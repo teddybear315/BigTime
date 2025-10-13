@@ -1,0 +1,7 @@
+
+*.db
+.vscode/*
+*.pyc
+build/*
+ico.png
+2.0.md
