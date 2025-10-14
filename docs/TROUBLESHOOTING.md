@@ -609,13 +609,13 @@ logs/
 
 ### Common Log Messages
 
-| Message | Meaning | Action |
-|---------|---------|--------|
-| `Connection refused` | Server not running/accessible | Check server, firewall |
-| `Invalid API key` | Authentication failed | Regenerate key |
-| `Database is locked` | Concurrent access issue | Restart application |
-| `Already syncing` | Sync in progress | Wait or check for stuck sync |
-| `NTP sync failed` | Time sync unavailable | Optional - check internet |
+| Message              | Meaning                       | Action                       |
+| -------------------- | ----------------------------- | ---------------------------- |
+| `Connection refused` | Server not running/accessible | Check server, firewall       |
+| `Invalid API key`    | Authentication failed         | Regenerate key               |
+| `Database is locked` | Concurrent access issue       | Restart application          |
+| `Already syncing`    | Sync in progress              | Wait or check for stuck sync |
+| `NTP sync failed`    | Time sync unavailable         | Optional - check internet    |
 
 ---
 

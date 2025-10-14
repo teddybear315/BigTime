@@ -55,11 +55,11 @@ class RemoteSyncService(QObject):
 
         # Setup sync timer
         self.sync_timer = QTimer(self)
-        self.sync_timer.timeout.connect(self.sync_now)
+        self.sync_timer.timeout.connect(self._trigger_background_sync)
 
         # Setup connection check timer
         self.connection_timer = QTimer(self)
-        self.connection_timer.timeout.connect(self.check_connection)
+        self.connection_timer.timeout.connect(self._trigger_background_connection_check)
 
         self._session = requests.Session()
         self._session.headers.update({
@@ -71,6 +71,27 @@ class RemoteSyncService(QObject):
         if self.config.api_key:
             self._session.headers['Authorization'] = f'Bearer {self.config.api_key}'
 
+    def _trigger_background_sync(self):
+        """Trigger sync in background thread to avoid blocking UI"""
+        def background_sync():
+            try:
+                self.sync_now()
+            except Exception as e:
+                logger.error(f"Background sync error: {e}")
+
+        sync_thread = threading.Thread(target=background_sync, daemon=True)
+        sync_thread.start()
+
+    def _trigger_background_connection_check(self):
+        """Trigger connection check in background thread to avoid blocking UI"""
+        def background_check():
+            try:
+                self.check_connection()
+            except Exception as e:
+                logger.debug(f"Background connection check error: {e}")
+
+        check_thread = threading.Thread(target=background_check, daemon=True)
+        check_thread.start()
 
     def repair_pending_and_failed_logs(self) -> int:
         """Repair local logs that are missing critical fields (e.g., client_id/device_id).
@@ -216,11 +237,15 @@ class RemoteSyncService(QObject):
 
         self.is_running = True
 
-        # Perform a full sync on startup to guarantee complete alignment BEFORE starting timers
-        try:
-            self.full_sync_now()
-        except Exception as e:
-            logger.warning(f"Initial sync failed (will retry on timer): {e}")
+        # Perform initial sync in background thread to avoid freezing UI
+        def background_initial_sync():
+            try:
+                self.full_sync_now()
+            except Exception as e:
+                logger.warning(f"Initial sync failed (will retry on timer): {e}")
+
+        initial_sync_thread = threading.Thread(target=background_initial_sync, daemon=True)
+        initial_sync_thread.start()
 
         # Start sync timer
         self.sync_timer.start(self.config.sync_interval * 1000)
@@ -250,7 +275,7 @@ class RemoteSyncService(QObject):
         try:
             response = self._session.get(
                 f"{self.config.server_url}/health",
-                timeout=30
+                timeout=3  # Short timeout to prevent UI freezing
             )
             is_online = response.status_code == 200
 

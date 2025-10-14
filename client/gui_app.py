@@ -63,7 +63,7 @@ class BigTimeClientApp(QMainWindow):
 
         self.setWindowTitle('BigTime - Loading...')
         self.setWindowIcon(create_app_icon())
-        self.setMinimumSize(420, 420)
+        self.setMinimumSize(400, 400)
 
         # Create central widget with loading message
         central_widget = QWidget()
@@ -218,7 +218,7 @@ class BigTimeClientApp(QMainWindow):
 
         self.setWindowTitle(f'{self.company_name} - BigTime')
         self.setWindowIcon(create_app_icon())
-        self.setMinimumSize(420, 420)
+        # self.setMinimumSize(420, 420)
 
         # Central widget
         central_widget = QWidget()
@@ -226,18 +226,16 @@ class BigTimeClientApp(QMainWindow):
 
         # Main layout
         main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(20, 30, 20, 20)
         main_layout.setSpacing(12)
-        main_layout.setContentsMargins(30, 30, 30, 30)
 
         # Clock group (stays at top)
-        clock_group = QHBoxLayout()
+        clock_group = QVBoxLayout()
         self.clock = QLabel(f'{self.company_name}')
         self.clock.setFont(fonts["monospace_large"])
         self.clock.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # clock_group.addStretch()
         clock_group.addWidget(self.clock)
-        # clock_group.addStretch()
         main_layout.addLayout(clock_group)
 
         # Initial update
@@ -285,7 +283,7 @@ class BigTimeClientApp(QMainWindow):
         self.clock_out_btn.clicked.connect(self.clock_out)
         btns_row.addWidget(self.clock_out_btn)
 
-        self.status_label = QLabel('')
+        self.status_label = QLabel('Ready')
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setFont(fonts["small_bold"])
 
@@ -299,38 +297,36 @@ class BigTimeClientApp(QMainWindow):
 
         # Footer: small Fetch button at left and compact Sync status anchored to bottom-right
         footer_layout = QHBoxLayout()
-        fetch_btn = QPushButton('Sync')
-        fetch_btn.setToolTip('Sync DB from BigTime server now')
-        # fonts imported as `fonts` at module level
-        fetch_btn.setFont(fonts['small'])
-        fetch_btn.setFixedSize(QSize(56, 18))
-        fetch_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        fetch_btn.clicked.connect(self.sync_now)
-        self.fetch_btn = fetch_btn
-        footer_layout.addWidget(fetch_btn, 0, Qt.AlignmentFlag.AlignLeft)
-        footer_layout.addStretch()
+        # fetch_btn = QPushButton('Sync')
+        # fetch_btn.setToolTip('Sync DB from BigTime server now')
+        # # fonts imported as `fonts` at module level
+        # fetch_btn.setFont(fonts['small'])
+        # fetch_btn.setFixedSize(QSize(56, 18))
+        # fetch_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # fetch_btn.clicked.connect(self.sync_now)
+        # self.fetch_btn = fetch_btn
+        # footer_layout.addWidget(fetch_btn, 0, Qt.AlignmentFlag.AlignLeft)
 
         # Sync status: show online/offline/syncing indicator and last sync time
-        status_container = QWidget()
-        status_layout = QHBoxLayout(status_container)
+        self.status_container = QWidget()
+        status_layout = QHBoxLayout(self.status_container)
         status_layout.setContentsMargins(0, 0, 0, 0)
 
         # Small label indicating sync state (emoji + text)
         self.sync_status_label = QLabel('')
         self.sync_status_label.setFont(fonts['small_bold'])
-        status_layout.addWidget(self.sync_status_label)
+        status_layout.addWidget(self.sync_status_label, 0, Qt.AlignmentFlag.AlignLeft)
 
         # Spacer
-        status_layout.addSpacing(8)
+        # status_layout.addSpacing(8)
+        status_layout.addStretch()
 
         # Last sync time label
         self.last_sync_label = QLabel('')
         self.last_sync_label.setFont(fonts['small'])
-        status_layout.addWidget(self.last_sync_label)
+        status_layout.addWidget(self.last_sync_label, 0, Qt.AlignmentFlag.AlignRight)
 
-        self.status_container = status_container
-        status_container.setVisible(True)
-        footer_layout.addWidget(status_container, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter)
+        footer_layout.addWidget(self.status_container, 0, Qt.AlignmentFlag.AlignBottom)
         main_layout.addLayout(footer_layout)
 
         # Focus on input
@@ -540,7 +536,7 @@ class BigTimeClientApp(QMainWindow):
                     return
         else:
             reply = QMessageBox.question(
-                None, 'Confirm Removal',
+                None, 'Confirm Logout',
                 f'Are you sure you want to logout?',
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No
@@ -1105,6 +1101,7 @@ class BigTimeClientApp(QMainWindow):
                     self.last_sync_label.setText(f'Last sync: {last_text}')
                 else:
                     self.last_sync_label.setText('Last sync: N/A')
+                self.last_sync_label.setStyleSheet('color: #666;')
 
         except Exception as e:
             self.logger.error(f"Error updating footer sync status: {e}")

@@ -91,6 +91,54 @@ dist/
     └── BigTime - Shortcut # Client Shortcut for Desktop
 ```
 
+### Server Autostart
+
+Configure the server to automatically start on system boot.
+
+Autostart setup files are located in the `dist/` folder.
+
+**Windows**:
+```bash
+# Navigate to dist folder
+cd dist
+
+# Enable autostart
+enable_autostart.bat
+
+# Disable autostart
+disable_autostart.bat
+```
+
+**Linux/macOS**:
+```bash
+# Navigate to dist folder
+cd dist
+
+# Enable autostart
+chmod +x enable_autostart.sh
+./enable_autostart.sh
+
+# Disable autostart
+chmod +x disable_autostart.sh
+./disable_autostart.sh
+```
+
+**Manual (Advanced)**:
+```bash
+# From dist folder
+python setup_autostart.py --enable --executable /path/to/BigTime-Server.exe
+
+# Disable autostart
+python setup_autostart.py --disable
+```
+
+**Note**: On Windows, requires `pywin32` and `winshell` packages:
+```bash
+pip install pywin32 winshell
+```
+
+See `docs/AUTOSTART.md` for detailed documentation.
+
 ---
 
 ## 🏗️ Architecture

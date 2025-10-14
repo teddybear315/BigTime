@@ -6,6 +6,7 @@ ntplib
 
 # PDF Generation (Reports, Paystubs)
 reportlab
+Pillow  # Required by reportlab for image handling
 
 # Server Framework
 flask
@@ -22,3 +23,9 @@ tzdata
 
 # Colored Console Output (optional, has fallback)
 termcolor
+
+# Windows Autostart Setup (Windows only - optional)
+# Required only for setup_autostart.py script on Windows
+# Install with: pip install pywin32 winshell
+# pywin32
+# winshell

@@ -14,6 +14,7 @@ a = Analysis(
         'requests',
         'ntplib',
         'reportlab',
+        'PIL',  # Required by reportlab
         'zoneinfo',
     ],
     hookspath=[],
@@ -23,7 +24,6 @@ a = Analysis(
         'tkinter',
         'matplotlib',
         'numpy',
-        'PIL',
         'test',
         'unittest',
     ],

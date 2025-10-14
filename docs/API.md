@@ -678,15 +678,15 @@ All errors follow this format:
 
 ### HTTP Status Codes
 
-| Code | Meaning | Description |
-|------|---------|-------------|
-| 200 | OK | Request successful |
-| 201 | Created | Resource created successfully |
-| 400 | Bad Request | Invalid request data |
-| 401 | Unauthorized | Invalid or missing API key |
-| 404 | Not Found | Resource not found |
-| 409 | Conflict | Duplicate resource (e.g., badge exists) |
-| 500 | Internal Server Error | Server error |
+| Code | Meaning               | Description                             |
+| ---- | --------------------- | --------------------------------------- |
+| 200  | OK                    | Request successful                      |
+| 201  | Created               | Resource created successfully           |
+| 400  | Bad Request           | Invalid request data                    |
+| 401  | Unauthorized          | Invalid or missing API key              |
+| 404  | Not Found             | Resource not found                      |
+| 409  | Conflict              | Duplicate resource (e.g., badge exists) |
+| 500  | Internal Server Error | Server error                            |
 
 ### Common Error Examples
 
