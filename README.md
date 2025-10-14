@@ -2,7 +2,7 @@
 
 ## This program was written 100% by AI because I Dont Have Time™
 
-A comprehensive time tracking and payroll management system with client-server architecture, built with Python and PyQt6.
+A basic time tracking and payroll management system with client-server architecture, built with Python and PyQt6.
 
 ---
 
