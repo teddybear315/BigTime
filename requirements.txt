@@ -1,3 +1,24 @@
+# GUI Framework (Client & Server Tray)
 PyQt6
+
+# Time Synchronization (Server - optional, has fallback)
 ntplib
+
+# PDF Generation (Reports, Paystubs)
 reportlab
+
+# Server Framework
+flask
+flask-cors
+
+# Production WSGI Server (replaces Flask dev server)
+waitress
+
+# HTTP Client (Sync Service)
+requests
+
+# Timezone Data (required on Windows for zoneinfo)
+tzdata
+
+# Colored Console Output (optional, has fallback)
+termcolor

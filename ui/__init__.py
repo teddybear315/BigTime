@@ -1,8 +1,19 @@
-"""UI package export for the timeclock application.
+"""UI package for BigTime client application.
 
-Expose a simple run_app() function from the app module so the top-level
-`main.py` can remain a thin launcher.
+Contains UI widgets and dialog components used by the client application.
+Main GUI application logic is now in client.gui_app.BigTimeClientApp.
 """
-from .app import run_app
 
-__all__ = ["run_app"]
+# Export the dialog components that are used by the client
+from .dialogs import (AddEmployeeDialog, DateRangeDialog, EditEmployeeDialog,
+                      EditLogsDialog, OOTBClientDialog, OOTBServerDialog,
+                      ServerConfigDialog, SettingsDialog)
+from .fonts import fonts
+from .pdf_utils import generate_paystub_pdf
+
+__all__ = [
+    "AddEmployeeDialog", "EditEmployeeDialog", "DateRangeDialog", "EditLogsDialog",
+    "OOTBClientDialog", "OOTBServerDialog", "ServerConfigDialog", "SettingsDialog",
+    "generate_paystub_pdf",
+    "fonts"
+]
