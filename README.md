@@ -61,6 +61,11 @@ python launcher.py console-server
 Build standalone executables with PyInstaller:
 
 ```bash
+# Install pyinstaller
+pip install pyinstaller
+# OR (when windows doesnt like you)
+python -m pip install pyinstaller
+
 # Build client
 pyinstaller BigTime-Client.spec
 
@@ -75,6 +80,16 @@ Executables will be in `dist/` folder:
 
 - `dist/BigTime-Client.exe` (or .app on macOS)
 - `dist/BigTime-Server.exe` (or .app on macOS)
+
+Feel free to make a pull request to merge other platform's executables in a format similar to the one shown below
+
+```text
+dist/
+└── <OS>/                  # OS Executable Package
+    ├── BigTime-Client     # Client Executable
+    ├── BigTime-Server     # Server Executable
+    └── BigTime - Shortcut # Client Shortcut for Desktop
+```
 
 ---
 
