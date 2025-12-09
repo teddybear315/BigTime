@@ -65,16 +65,21 @@ class BigTimeFormatter(logging.Formatter):
 
 
 def setup_logging(component: str, level: str = "INFO", log_to_file: bool = True) -> logging.Logger:
-    """
-    Setup standardized logging for BigTime components.
+    """Setup standardized logging for BigTime components.
+
+    Configures console and optional file logging with consistent formatting.
+    Handles edge cases where stdout/stderr may be unavailable (PyInstaller builds).
 
     Args:
-        component: Component name (e.g., "CLIENT", "SERVER", "SYNC")
-        level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        log_to_file: Whether to also log to file
+        component: Component name (e.g., 'CLIENT', 'SERVER', 'SYNC') for logger identification
+        level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL). Defaults to INFO
+        log_to_file: Whether to also log to file in logs/ directory. Defaults to True
 
     Returns:
-        Configured logger instance
+        Configured logger instance with console and optional file handlers
+
+    Note:
+        Prevents duplicate handlers if called multiple times with same component.
     """
     logger = logging.getLogger(f"bigtime.{component.lower()}")
 

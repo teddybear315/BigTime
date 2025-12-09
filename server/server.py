@@ -23,8 +23,19 @@ from shared.utils import (format_date, format_datetime, get_data_path,
 # Setup standardized logging
 logger = get_server_logger()
 
+# Server configuration constants
+DB_BUSY_TIMEOUT_MS: int = 5000
+DEFAULT_SERVER_PORT: int = 5000
+WAITRESS_CHANNEL_TIMEOUT: int = 60
+WAITRESS_CLEANUP_INTERVAL: int = 30
+STARTUP_DELAY_MS: int = 1000
+
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
+
+# Global reference to Waitress server for graceful shutdown
+_waitress_server = None
+_waitress_lock = None
 
 # Configuration
 SERVER_DB = get_data_path('server_bigtime.db')
@@ -34,26 +45,32 @@ API_KEYS = {
 
 
 def get_db():
-    """Get database connection (for Flask context)"""
+    """Get database connection (for Flask context).
+
+    Sets up connection with WAL mode and busy timeout for concurrent access.
+    """
     if 'db' not in g:
         g.db = sqlite3.connect(str(SERVER_DB))
         try:
-            g.db.execute("PRAGMA busy_timeout = 5000")
+            g.db.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}")
             g.db.execute("PRAGMA journal_mode = WAL")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to set PRAGMA options: {e}")
         g.db.row_factory = sqlite3.Row
     return g.db
 
 
 def get_standalone_db():
-    """Get standalone database connection (outside Flask context)"""
+    """Get standalone database connection (outside Flask context).
+
+    Sets up connection with WAL mode and busy timeout for concurrent access.
+    """
     conn = sqlite3.connect(str(SERVER_DB))
     try:
-        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA journal_mode = WAL")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to set PRAGMA options: {e}")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -74,7 +91,7 @@ def init_server_db():
     """Initialize server database and time service"""
     conn = sqlite3.connect(str(SERVER_DB))
     try:
-        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA journal_mode = WAL")
     except Exception:
         pass
@@ -147,7 +164,7 @@ def init_server_db():
         # Insert default settings
         default_settings = [
             ('host', '127.0.0.1'),
-            ('port', '5000'),
+            ('port', str(DEFAULT_SERVER_PORT)),
             ('autostart', 'true'),
             ('company_name', 'BigTime'),
             ('setup_completed', 'false')
@@ -199,6 +216,31 @@ def get_server_setting(key: str, default=None):
         return default
 
 
+def _ensure_settings_table(conn: sqlite3.Connection) -> bool:
+    """Ensure settings table exists in database.
+
+    Args:
+        conn: Database connection
+
+    Returns:
+        True if table exists or was created, False otherwise
+    """
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Failed to ensure settings table: {e}")
+        return False
+
+
 def set_server_setting(key: str, value: str):
     """Set a server setting in the database"""
     try:
@@ -206,6 +248,8 @@ def set_server_setting(key: str, value: str):
         from flask import has_app_context
         if has_app_context():
             conn = get_db()
+            if not _ensure_settings_table(conn):
+                return False
             cursor = conn.execute("""
                 INSERT OR REPLACE INTO settings (key, value, updated_at)
                 VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -216,6 +260,8 @@ def set_server_setting(key: str, value: str):
             # Use standalone connection
             conn = get_standalone_db()
             try:
+                if not _ensure_settings_table(conn):
+                    return False
                 cursor = conn.execute("""
                     INSERT OR REPLACE INTO settings (key, value, updated_at)
                     VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -833,23 +879,84 @@ def onboard_device():
 
 
 
-def run_server(host='0.0.0.0', port=5000):
+def run_server(host='0.0.0.0', port=DEFAULT_SERVER_PORT):
     """Run server with Waitress WSGI server"""
-    from waitress import serve
+    # Use create_server/run to allow a programmatic shutdown
+    try:
+        from waitress import create_server
+    except Exception:
+        # Fallback to serve if create_server isn't available
+        from waitress import serve
+
+        logger.info(f"Starting BigTime Server on {host}:{port}")
+        logger.info("Using Waitress WSGI server (serve)")
+
+        # Waitress configuration
+        serve(
+            app,
+            host=host,
+            port=port,
+            threads=6,  # Handle multiple concurrent requests
+            channel_timeout=WAITRESS_CHANNEL_TIMEOUT,
+            cleanup_interval=WAITRESS_CLEANUP_INTERVAL,
+            asyncore_use_poll=True  # Better performance on Windows
+        )
+        return
+
+    global _waitress_server, _waitress_lock
+    import threading
 
     logger.info(f"Starting BigTime Server on {host}:{port}")
-    logger.info("Using Waitress WSGI server")
+    logger.info("Using Waitress WSGI server (create_server)")
 
-    # Waitress configuration
-    serve(
+    # Build the server instance
+    server = create_server(
         app,
         host=host,
         port=port,
-        threads=6,  # Handle multiple concurrent requests
-        channel_timeout=60,
-        cleanup_interval=30,
-        asyncore_use_poll=True  # Better performance on Windows
+        threads=6,
+        channel_timeout=WAITRESS_CHANNEL_TIMEOUT,
+        cleanup_interval=WAITRESS_CLEANUP_INTERVAL,
+        asyncore_use_poll=True
     )
+
+    _waitress_lock = threading.Lock()
+    with _waitress_lock:
+        _waitress_server = server
+
+    try:
+        # This blocks until server stops
+        server.run()
+    finally:
+        with _waitress_lock:
+            _waitress_server = None
+
+
+@app.route('/admin/shutdown', methods=['POST'])
+def admin_shutdown():
+    """Shutdown the waitress server gracefully. Restricted to local requests only."""
+    try:
+        # Only allow local requests for shutdown
+        remote_addr = request.remote_addr
+        if remote_addr not in (None, '127.0.0.1', '::1', 'localhost'):
+            return jsonify(ApiResponse(False, error="Forbidden").to_dict()), 403
+
+        global _waitress_server, _waitress_lock
+        if _waitress_server is None:
+            return jsonify(ApiResponse(False, error="Server not running").to_dict()), 400
+
+        # Use close() to stop the server loop
+        try:
+            with _waitress_lock:
+                _waitress_server.close()
+        except Exception as e:
+            logger.error(f"Error shutting down server: {e}")
+            return jsonify(ApiResponse(False, error=str(e)).to_dict()), 500
+
+        return jsonify(ApiResponse(True, data={"message": "Shutdown initiated"}).to_dict())
+    except Exception as e:
+        logger.error(f"Shutdown request failed: {e}")
+        return jsonify(ApiResponse(False, error=str(e)).to_dict()), 500
 
 
 if __name__ == '__main__':
@@ -859,7 +966,7 @@ if __name__ == '__main__':
     # Get configuration from database
     config = get_server_config()
     host = config.get('host', '0.0.0.0')
-    port = config.get('port', 5000)
+    port = config.get('port', DEFAULT_SERVER_PORT)
 
     # Run server
     run_server(host, port)

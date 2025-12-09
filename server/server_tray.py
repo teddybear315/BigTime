@@ -7,10 +7,9 @@ Supports Windows, Linux, and macOS with appropriate fallbacks.
 import os
 import platform
 import sys
-import threading
 from pathlib import Path
 
-from PyQt6.QtCore import QCoreApplication, QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QCoreApplication, QThread, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import (QApplication, QDialog, QMenu, QMessageBox,
                              QSystemTrayIcon)
@@ -19,6 +18,10 @@ from shared.logging_config import get_server_logger
 
 # Setup standardized logging
 logger = get_server_logger()
+
+# Server configuration constants
+DEFAULT_SERVER_PORT: int = 5000
+STARTUP_DELAY_MS: int = 1000
 
 
 def is_system_tray_available():
@@ -48,8 +51,8 @@ def is_system_tray_available():
     return False
 
 
-class ServerManager(QObject):
-    """Manages the Flask server in a separate thread"""
+class ServerManager(QThread):
+    """Manages the Flask server inside a QThread."""
 
     server_started = pyqtSignal()
     server_stopped = pyqtSignal()
@@ -57,37 +60,84 @@ class ServerManager(QObject):
 
     def __init__(self):
         super().__init__()
-        self.server_thread = None
         self.server_running = False
+        self._host = '127.0.0.1'
+        self._port = DEFAULT_SERVER_PORT
 
-    def start_server(self, host='127.0.0.1', port=5000):
-        """Start the server in a separate thread using production WSGI server"""
+    def start_server(self, host='127.0.0.1', port=DEFAULT_SERVER_PORT):
+        """Start the server thread. The actual server runs inside `run()`."""
         if self.server_running:
             return
 
-        def run_server():
-            try:
-                from server.server import init_server_db
-                from server.server import run_server as start_server
+        self._host = host
+        self._port = port
 
-                # Initialize database and time service
-                init_server_db()
-
-                # Run server (uses Waitress)
-                start_server(host=host, port=port)
-
-            except Exception as e:
-                self.server_error.emit(str(e))
-
-        self.server_thread = threading.Thread(target=run_server, daemon=True)
-        self.server_thread.start()
+        # Start QThread; run() will initialize and run the server
+        self.start()
         self.server_running = True
         self.server_started.emit()
 
     def stop_server(self):
-        """Stop the server (note: Flask doesn't have built-in graceful shutdown)"""
+        """Stop the server by calling the local shutdown endpoint and wait for the thread to exit.
+
+        Falls back to clearing the running flag if network shutdown fails.
+        """
+        if not self.server_running:
+            return
+
+        try:
+            # Attempt graceful shutdown via local admin endpoint
+            import requests
+            url = f'http://{self._host}:{self._port}/admin/shutdown'
+            try:
+                requests.post(url, timeout=3)
+            except Exception as e:
+                logger.warning(f"Shutdown request failed: {e}")
+        except ImportError:
+            # requests not available; continue to fallback
+            logger.debug("requests module unavailable; falling back to thread stop.")
+        except Exception as e:
+            # Shutdown request failed; continue to fallback
+            logger.debug(f"Graceful shutdown failed: {e}")
+
+        # Wait briefly for the server thread to exit
+        try:
+            self.wait(3000)
+        except Exception as e:
+            logger.debug(f"Thread wait error: {e}")
+
+        # Ensure running flag cleared and emit stopped for UI update
         self.server_running = False
-        self.server_stopped.emit()
+        try:
+            self.server_stopped.emit()
+        except Exception as e:
+            logger.debug(f"Failed to emit server_stopped signal: {e}")
+
+    def run(self):
+        """Thread entry point: initialize DB and run the server (blocking)."""
+        try:
+            from server.server import init_server_db
+            from server.server import run_server as start_server
+
+            # Initialize database and time service
+            init_server_db()
+
+            # Run server (uses Waitress) - blocking call
+            start_server(host=self._host, port=self._port)
+
+        except Exception as e:
+            # Emit error from the thread
+            try:
+                self.server_error.emit(str(e))
+            except Exception as signal_error:
+                logger.error(f"Failed to emit server_error signal: {signal_error}")
+        finally:
+            # Ensure running flag is cleared when server exits
+            self.server_running = False
+            try:
+                self.server_stopped.emit()
+            except Exception as e:
+                logger.debug(f"Failed to emit server_stopped signal in finally: {e}")
 
 
 
@@ -114,6 +164,13 @@ class BigTimeServerTray(QObject):
         self.server_manager.server_stopped.connect(self.on_server_stopped)
         self.server_manager.server_error.connect(self.on_server_error)
 
+        # Initialize database before loading settings (fixes "no such table: settings" error)
+        try:
+            from server.server import init_server_db
+            init_server_db()
+        except Exception as e:
+            logger.error(f"Failed to initialize server database: {e}")
+
         # Load settings
         self.load_settings()
 
@@ -126,7 +183,7 @@ class BigTimeServerTray(QObject):
 
         # Auto-start server if configured (and setup is completed)
         if getattr(self, 'autostart', True) and self.setup_completed:
-            QTimer.singleShot(1000, self.start_server)  # Delay to ensure tray is ready
+            QTimer.singleShot(STARTUP_DELAY_MS, self.start_server)  # Delay to ensure tray is ready
 
     def create_tray_icon(self):
         """Create the system tray icon"""
@@ -152,6 +209,14 @@ class BigTimeServerTray(QObject):
         self.config_action = QAction("Configure...", self)
         self.config_action.triggered.connect(self.show_config)
 
+        # Backup action
+        self.backup_action = QAction("Backup Database", self)
+        self.backup_action.triggered.connect(self.backup_database)
+
+        # Restore action
+        self.restore_action = QAction("Restore from Backup", self)
+        self.restore_action.triggered.connect(self.restore_database)
+
         # Status action (non-clickable info)
         self.status_action = QAction("Status: Stopped", self)
         self.status_action.setEnabled(False)
@@ -167,6 +232,8 @@ class BigTimeServerTray(QObject):
         menu.addAction(self.stop_action)
         menu.addSeparator()
         menu.addAction(self.config_action)
+        menu.addAction(self.backup_action)
+        menu.addAction(self.restore_action)
         menu.addSeparator()
         menu.addAction(self.quit_action)
 
@@ -182,7 +249,7 @@ class BigTimeServerTray(QObject):
 
             # Set defaults
             self.host = config.get('host', '127.0.0.1')
-            self.port = config.get('port', 5000)
+            self.port = config.get('port', DEFAULT_SERVER_PORT)
             self.autostart = config.get('autostart', True)
             self.company_name = config.get('company_name', 'BigTime')
             self.setup_completed = config.get('setup_completed', False)
@@ -191,7 +258,7 @@ class BigTimeServerTray(QObject):
             # If database is not available, use defaults
             logger.warning(f"Could not load server config from database: {e}")
             self.host = '127.0.0.1'
-            self.port = 5000
+            self.port = DEFAULT_SERVER_PORT
             self.autostart = True
             self.company_name = 'BigTime'
             self.setup_completed = False
@@ -273,6 +340,54 @@ class BigTimeServerTray(QObject):
                 QMessageBox.information(None, "Server Configuration",
                                       "Settings saved. Please restart the server for changes to take effect.")
 
+    def backup_database(self):
+        """Backup the server database"""
+        from shared.backup_utils import create_backup
+
+        try:
+            backup_path = create_backup('server_bigtime.db')
+            QMessageBox.information(None, 'Backup', f'Database backed up as {backup_path}')
+        except FileNotFoundError:
+            QMessageBox.warning(None, 'Backup Failed', 'Server database not found.')
+        except Exception as e:
+            QMessageBox.warning(None, 'Backup Failed', f'Could not backup database: {e}')
+
+    def restore_database(self):
+        """Restore the server database from the most recent backup"""
+        from shared.backup_utils import get_latest_backup_info, restore_from_backup
+
+        # Get the latest backup
+        backup_info = get_latest_backup_info('server_bigtime.db')
+
+        if not backup_info:
+            QMessageBox.warning(None, 'Restore Failed', 'No backups available.')
+            return
+
+        backup_path, formatted_time = backup_info
+
+        # Confirm with user
+        reply = QMessageBox.question(
+            None,
+            'Restore Database',
+            f'Restore database from backup created on {formatted_time}?\n\n'
+            'Your current database will be backed up before restoring.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            restore_from_backup(backup_path, 'server_bigtime.db')
+            QMessageBox.information(
+                None,
+                'Restore Complete',
+                'Database has been restored from backup.\n\nPlease restart the server for changes to take effect.'
+            )
+        except Exception as e:
+            QMessageBox.critical(None, 'Restore Failed', f'Could not restore database: {e}')
+
     def on_server_started(self):
         """Handle server started event"""
         self.status_action.setText(f"Status: Running on {self.host}:{self.port}")
@@ -337,7 +452,7 @@ def run_console_server():
 
         # Default configuration
         host = '127.0.0.1'
-        port = 5000
+        port = DEFAULT_SERVER_PORT
 
         logger.info(f"Starting server on {host}:{port}")
         logger.info(f"Server will be accessible at: http://{host}:{port}")

@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QDateTimeEdit,
                              QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
                              QHeaderView, QLabel, QLineEdit, QPushButton,
                              QSpinBox, QTableWidget, QTableWidgetItem,
-                             QTextEdit, QVBoxLayout)
+                             QTextEdit, QVBoxLayout, QMessageBox)
 
 from shared.models import Employee
 from shared.utils import create_app_icon
@@ -20,8 +20,24 @@ def set_dialog_icon(dialog):
 
 
 class EditLogsDialog(QDialog):
+    """Dialog for editing multiple time logs with inline editors.
+
+    Allows users to modify clock-in and clock-out times for time entries,
+    with timezone-aware datetime editing and validation.
+
+    Signals:
+        log_removed: Emitted when a log is removed (int: log_id)
+    """
     log_removed = pyqtSignal(int)  # log_id
+
     def __init__(self, logs, parent=None, server_timezone='UTC'):
+        """Initialize the logs editor dialog.
+
+        Args:
+            logs: List of tuples (log_id, clock_in, clock_out) to edit
+            parent: Parent widget for modal presentation
+            server_timezone: Timezone string for converting times (default: 'UTC')
+        """
         super().__init__(parent)
         self.setWindowTitle('Time Log Editor')
         self.server_timezone = server_timezone
@@ -181,6 +197,173 @@ class EditLogsDialog(QDialog):
                     pass
                 self.remove_buttons[log_id].setDisabled(True)
                 break
+        self.close()
+
+
+class EditTimeSelectorDialog(QDialog):
+    """Dialog to select an employee and date, then view/edit logs.
+
+    This was previously implemented inline in `client/gui_app.py`.
+    Centralizing it here allows other modules to reuse the same dialog.
+    """
+
+    def __init__(self, client, parent=None):
+        super().__init__(parent)
+        self.client = client
+        self.setWindowTitle('Edit Time Logs')
+        self.setFixedWidth(500)
+        self.resize(500, 600)
+
+        layout = QVBoxLayout(self)
+
+        # Header
+        title = QLabel('Time Log Editor')
+        title.setFont(fonts["header"])
+        sub_title = QLabel('Select an employee and press load logs.')
+        sub_title.setFont(fonts["small"])
+        sub_title.setStyleSheet('color: #666;')
+        sub_title.setWordWrap(True)
+
+        layout.addWidget(title)
+        layout.addWidget(sub_title)
+
+        # Employee table
+        emp_label = QLabel('Select Employee:')
+        layout.addWidget(emp_label)
+
+        self.emp_table = QTableWidget()
+        self.emp_table.setColumnCount(2)
+        self.emp_table.setHorizontalHeaderLabels(['ID', 'Name'])
+        self.emp_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.emp_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.emp_table.setColumnWidth(0, 40)
+        self.emp_table.setColumnWidth(1, 320)
+        layout.addWidget(self.emp_table)
+
+        # Controls row (date selector and load button)
+        controls_row = QHBoxLayout()
+        date_label = QLabel('Date:')
+        self.date_edit = QDateEdit()
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDate(QDate.currentDate())
+        load_btn = QPushButton('Load Logs')
+
+        controls_row.addWidget(date_label)
+        controls_row.addWidget(self.date_edit)
+        controls_row.addWidget(load_btn)
+        controls_row.addStretch()
+        layout.addLayout(controls_row)
+
+        # Logs table
+        self.logs_table = QTableWidget()
+        self.logs_table.setColumnCount(4)
+        self.logs_table.setHorizontalHeaderLabels(['ID', 'Clock In', 'Clock Out', ''])
+        self.logs_table.setColumnWidth(0, 40)
+        self.logs_table.setColumnWidth(1, 160)
+        self.logs_table.setColumnWidth(2, 160)
+        self.logs_table.setColumnWidth(3, 80)
+        layout.addWidget(self.logs_table)
+
+        # Bottom buttons
+        btn_row = QHBoxLayout()
+        close_btn = QPushButton('Close')
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+        # Hook up signals
+        load_btn.clicked.connect(self.load_logs_for_selected)
+        close_btn.clicked.connect(self.accept)
+
+        # Load employees initially
+        self.load_employees()
+
+    def load_employees(self):
+        """Populate the employee table from the client"""
+        try:
+            employees = self.client.get_all_employees()
+            self.emp_table.setRowCount(len(employees))
+
+            for r, emp in enumerate(employees):
+                badge_item = QTableWidgetItem(emp.badge)
+                badge_item.setFlags(badge_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                badge_item.setData(Qt.ItemDataRole.UserRole, emp)
+
+                name_item = QTableWidgetItem(emp.name)
+                name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
+                self.emp_table.setItem(r, 0, badge_item)
+                self.emp_table.setItem(r, 1, name_item)
+
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Failed to load employees: {e}')
+
+    def load_logs_for_selected(self):
+        """Load logs for the selected employee and date into the logs table"""
+        selected = self.emp_table.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, 'Select Employee', 'Please select an employee from the list.')
+            return
+
+        try:
+            badge_item = self.emp_table.item(selected[0].row(), 0)
+            employee = badge_item.data(Qt.ItemDataRole.UserRole)
+            badge_text = employee.badge
+
+            qdate = self.date_edit.date()
+            selected_date = date(qdate.year(), qdate.month(), qdate.day())
+
+            logs = self.client.get_logs_for_range(badge_text, selected_date, selected_date)
+
+            self.logs_table.setRowCount(len(logs))
+
+            for r, log in enumerate(logs):
+                id_item = QTableWidgetItem(str(log.id))
+                id_item.setFlags(id_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.logs_table.setItem(r, 0, id_item)
+
+                ci_item = QTableWidgetItem(log.clock_in or '')
+                ci_item.setFlags(ci_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.logs_table.setItem(r, 1, ci_item)
+
+                co_item = QTableWidgetItem(log.clock_out or '')
+                co_item.setFlags(co_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.logs_table.setItem(r, 2, co_item)
+
+                edit_btn = QPushButton('Edit')
+                edit_btn.clicked.connect(lambda checked, log_obj=log: self.edit_single_log(log_obj))
+                self.logs_table.setCellWidget(r, 3, edit_btn)
+
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Failed to load logs: {e}')
+
+    def edit_single_log(self, log):
+        """Open `EditLogsDialog` for a single log and apply changes via the client"""
+        try:
+            log_data = [(log.id, log.clock_in, log.clock_out)]
+            edit_dlg = EditLogsDialog(log_data, self, server_timezone='UTC')
+
+            def handle_log_removal(removed_log_id):
+                try:
+                    success = self.client.delete_time_log(removed_log_id)
+                    if success:
+                        self.load_logs_for_selected()
+                    else:
+                        QMessageBox.warning(self, 'Warning', 'Failed to remove log entry.')
+                except Exception as e:
+                    QMessageBox.critical(self, 'Error', f'Failed to remove log: {str(e)}')
+
+            edit_dlg.log_removed.connect(handle_log_removal)
+
+            if edit_dlg.exec() == QDialog.DialogCode.Accepted:
+                updates = edit_dlg.get_updates()
+                if updates:
+                    log_id, new_clock_in, new_clock_out = updates[0]
+                    self.client.update_time_log(log_id, new_clock_in, new_clock_out)
+                    self.load_logs_for_selected()
+
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Failed to edit log: {str(e)}')
 
 
 
@@ -398,10 +581,6 @@ class EditEmployeeDialog(AddEmployeeDialog):
         self.pin = QLineEdit()
         self.pin.setMaxLength(4)
         self.pin.setPlaceholderText("Leave empty to keep current PIN")
-        self.pin.setEchoMode(QLineEdit.EchoMode.Password)
-        # Populate with existing PIN (will be masked)
-        if self.original_employee.pin:
-            self.pin.setText(self.original_employee.pin)
         security_layout.addRow('PIN:', self.pin)
 
         # Insert before buttons
@@ -488,6 +667,145 @@ class EditEmployeeDialog(AddEmployeeDialog):
             return
 
         super().accept()
+
+
+class EmployeeListDialog(QDialog):
+    """Dialog that lists employees and provides edit/remove actions.
+
+    Centralized implementation so callers import it from `ui.dialogs`.
+    """
+
+    def __init__(self, client, parent=None, data_changed_callback=None):
+        super().__init__(parent)
+        self.client = client
+        self.data_changed_callback = data_changed_callback
+
+        self.setWindowTitle('Employee Management')
+        self.setMinimumSize(300, 400)
+
+        layout = QVBoxLayout(self)
+
+        # Create table
+        self.table = QTableWidget()
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(['Badge', 'Name'])
+
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setMinimumHeight(200)
+
+        layout.addWidget(self.table)
+
+        # Controls
+        controls = QHBoxLayout()
+        self.remove_btn = QPushButton("Remove Selected")
+        self.edit_btn = QPushButton("Edit Selected")
+        self.refresh_btn = QPushButton("Refresh")
+        self.close_btn = QPushButton('Close')
+
+        controls.addWidget(self.remove_btn)
+        controls.addWidget(self.edit_btn)
+        controls.addStretch()
+        controls.addWidget(self.refresh_btn)
+        controls.addWidget(self.close_btn)
+        layout.addLayout(controls)
+
+        # Connections
+        self.edit_btn.clicked.connect(self.edit_selected_employee)
+        self.remove_btn.clicked.connect(self.delete_selected_employee)
+        self.refresh_btn.clicked.connect(self.load_employees)
+        self.close_btn.clicked.connect(self.accept)
+        self.table.itemDoubleClicked.connect(self.edit_selected_employee)
+
+        # Load initial data
+        self.load_employees()
+
+    def load_employees(self):
+        try:
+            employees = self.client.get_all_employees()
+            self.table.setRowCount(len(employees))
+
+            for row, emp in enumerate(employees):
+                badge_item = QTableWidgetItem(str(emp.badge))
+                badge_item.setFlags(badge_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                badge_item.setData(Qt.ItemDataRole.UserRole, emp)
+
+                name_item = QTableWidgetItem(emp.name)
+                name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
+                self.table.setItem(row, 0, badge_item)
+                self.table.setItem(row, 1, name_item)
+
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Failed to load employees: {e}')
+
+    def get_selected_employee(self):
+        current_row = self.table.currentRow()
+        if current_row >= 0:
+            badge_item = self.table.item(current_row, 0)
+            if badge_item:
+                return badge_item.data(Qt.ItemDataRole.UserRole)
+        return None
+
+    def edit_selected_employee(self):
+        employee = self.get_selected_employee()
+        if not employee:
+            QMessageBox.warning(self, 'No Selection', 'Please select an employee to edit.')
+            return
+
+        dlg = EditEmployeeDialog(employee, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            updated_employee = dlg.get_employee()
+            try:
+                badge_changed = employee.badge != updated_employee.badge
+                if badge_changed:
+                    success = self.client.update_employee_badge(employee.badge, updated_employee.to_dict())
+                    if success:
+                        QMessageBox.information(self, 'Success', f'Employee {updated_employee.name} updated successfully.')
+                        if self.data_changed_callback:
+                            self.data_changed_callback()
+                    else:
+                        QMessageBox.warning(self, 'Update Failed', 'Failed to update employee badge. Badge may already exist.')
+                        return
+                else:
+                    success = self.client.update_employee(updated_employee)
+                    if success:
+                        QMessageBox.information(self, 'Success', f'Employee {updated_employee.name} updated successfully.')
+                    else:
+                        QMessageBox.warning(self, 'Update Failed', 'Failed to update employee.')
+                        return
+
+                self.load_employees()
+
+            except Exception as e:
+                QMessageBox.critical(self, 'Error', f'Failed to update employee: {str(e)}')
+
+    def delete_selected_employee(self):
+        employee = self.get_selected_employee()
+        if not employee:
+            QMessageBox.warning(self, 'No Selection', 'Please select an employee to remove.')
+            return
+
+        reply = QMessageBox.question(self, 'Confirm Removal', f'Are you sure you want to remove {employee.name}?',
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                success = self.client.delete_employee(employee.badge)
+                if success:
+                    QMessageBox.information(self, 'Success', f'Employee {employee.name} removed successfully.')
+                    if self.data_changed_callback:
+                        self.data_changed_callback()
+                    self.load_employees()
+                else:
+                    QMessageBox.warning(self, 'Removal Failed', 'Failed to remove employee.')
+            except Exception as e:
+                QMessageBox.critical(self, 'Error', f'Failed to remove employee: {str(e)}')
 
 
 class SettingsDialog(QDialog):
@@ -668,11 +986,37 @@ class OOTBClientDialog(QDialog):
 
         layout.addWidget(sync_group)
 
+        # Test connection button and status label (same functionality as ClientSyncConfigDialog)
+        self.test_btn = QPushButton("Test Connection")
+        self.test_btn.clicked.connect(self.test_connection)
+        sync_layout.addWidget(self.test_btn)
+
+        # Status label for connection test results
+        self.status_label = QLabel("")
+        sync_layout.addWidget(self.status_label)
+
         # Generate default device ID
         self.generate_device_id()
 
         # Initially disable sync fields
         self.toggle_sync_fields()
+
+        layout.addSpacing(10)
+
+        # Restore from backup option
+        restore_group = QGroupBox("Restore Option")
+        restore_layout = QVBoxLayout(restore_group)
+
+        restore_info = QLabel("If you have existing backups, you can restore from the most recent backup:")
+        restore_info.setWordWrap(True)
+        restore_info.setFont(fonts["small"])
+        restore_layout.addWidget(restore_info)
+
+        self.restore_btn = QPushButton("Restore from Last Backup")
+        self.restore_btn.clicked.connect(self.restore_from_backup)
+        restore_layout.addWidget(self.restore_btn)
+
+        layout.addWidget(restore_group)
 
         # Buttons
         self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
@@ -700,6 +1044,112 @@ class OOTBClientDialog(QDialog):
         dir_path = QFileDialog.getExistingDirectory(self, 'Select Directory', self.path_edit.text())
         if dir_path:
             self.path_edit.setText(dir_path)
+
+    def test_connection(self):
+        """Test connection to the server (used in OOBE dialog)."""
+        import requests
+        from PyQt6.QtWidgets import QApplication
+
+        server_url = self.server_url_edit.text().strip()
+        api_key = self.api_key_edit.text().strip()
+
+        if not server_url:
+            self.status_label.setText("❌ Enter server URL first")
+            return
+
+        self.test_btn.setText("Testing...")
+        self.test_btn.setEnabled(False)
+        self.status_label.setText("⏳ Connecting to server...")
+        QApplication.processEvents()
+
+        try:
+            headers = {'Content-Type': 'application/json'}
+            if api_key:
+                headers['Authorization'] = f'Bearer {api_key}'
+
+            # Test /health endpoint first
+            response = requests.get(f"{server_url}/health", headers=headers, timeout=10)
+
+            if response.status_code == 200:
+                # Also test /api/v1/info to verify API key works
+                if api_key:
+                    try:
+                        info_response = requests.get(
+                            f"{server_url}/api/v1/info",
+                            headers=headers,
+                            timeout=5
+                        )
+                        if info_response.status_code == 200:
+                            data = info_response.json()
+                            if data.get('success'):
+                                company = data.get('data', {}).get('company_name', 'Unknown')
+                                self.status_label.setText(f"✅ Connected to {company}!")
+                            else:
+                                self.status_label.setText("✅ Connection successful (verify API key)")
+                        elif info_response.status_code == 401:
+                            self.status_label.setText("⚠️ Server reachable but API key invalid")
+                        else:
+                            self.status_label.setText(f"✅ Server reachable (API status: {info_response.status_code})")
+                    except Exception:
+                        self.status_label.setText("✅ Server reachable (couldn't verify API key)")
+                else:
+                    self.status_label.setText("✅ Server reachable (no API key to test)")
+            elif response.status_code == 401:
+                self.status_label.setText("⚠️ Server reachable but authentication failed")
+            else:
+                self.status_label.setText(f"❌ Server error: HTTP {response.status_code}")
+
+        except requests.exceptions.ConnectionError as e:
+            error_msg = str(e)
+            if "Errno 10061" in error_msg or "Connection refused" in error_msg:
+                self.status_label.setText("❌ Server not running or port blocked")
+            elif "Name or service not known" in error_msg or "nodename nor servname provided" in error_msg:
+                self.status_label.setText("❌ Invalid server address")
+            else:
+                self.status_label.setText(f"❌ Cannot connect: {error_msg[:50]}")
+        except requests.exceptions.Timeout:
+            self.status_label.setText("❌ Connection timeout (server too slow or unreachable)")
+        except Exception as e:
+            self.status_label.setText(f"❌ Connection failed: {str(e)[:60]}")
+        finally:
+            self.test_btn.setText("Test Connection")
+            self.test_btn.setEnabled(True)
+
+    def restore_from_backup(self):
+        """Restore database from the most recent backup"""
+        from shared.backup_utils import get_latest_backup_info, restore_from_backup as restore_db
+
+        # Get the latest backup
+        backup_info = get_latest_backup_info('bigtime.db')
+
+        if not backup_info:
+            QMessageBox.warning(self, 'Restore Failed', 'No backups available.')
+            return
+
+        backup_path, formatted_time = backup_info
+
+        # Confirm with user
+        reply = QMessageBox.question(
+            self,
+            'Restore Database',
+            f'Restore database from backup created on {formatted_time}?\n\n'
+            'Your current database will be backed up before restoring.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            restore_db(backup_path, 'bigtime.db')
+            QMessageBox.information(
+                self,
+                'Restore Complete',
+                'Database has been restored from backup.\n\nPlease restart the application for changes to take effect.'
+            )
+        except Exception as e:
+            QMessageBox.critical(self, 'Restore Failed', f'Could not restore database: {e}')
 
     def accept(self):
         """Validate manager PIN before accepting"""
@@ -788,6 +1238,23 @@ class OOTBServerDialog(QDialog):
 
         layout.addWidget(autostart_group)
 
+        layout.addSpacing(10)
+
+        # Restore from backup option
+        restore_group = QGroupBox("Restore Option")
+        restore_layout = QVBoxLayout(restore_group)
+
+        restore_info = QLabel("If you have existing backups, you can restore from the most recent backup:")
+        restore_info.setWordWrap(True)
+        restore_info.setFont(fonts["small"])
+        restore_layout.addWidget(restore_info)
+
+        self.restore_btn = QPushButton("Restore from Last Backup")
+        self.restore_btn.clicked.connect(self.restore_from_backup)
+        restore_layout.addWidget(self.restore_btn)
+
+        layout.addWidget(restore_group)
+
         # Buttons
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -795,6 +1262,42 @@ class OOTBServerDialog(QDialog):
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
         layout.addWidget(self.button_box)
+
+    def restore_from_backup(self):
+        """Restore database from the most recent backup"""
+        from shared.backup_utils import get_latest_backup_info, restore_from_backup as restore_db
+
+        # Get the latest backup
+        backup_info = get_latest_backup_info('server_bigtime.db')
+
+        if not backup_info:
+            QMessageBox.warning(self, 'Restore Failed', 'No backups available.')
+            return
+
+        backup_path, formatted_time = backup_info
+
+        # Confirm with user
+        reply = QMessageBox.question(
+            self,
+            'Restore Database',
+            f'Restore database from backup created on {formatted_time}?\n\n'
+            'Your current database will be backed up before restoring.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            restore_db(backup_path, 'server_bigtime.db')
+            QMessageBox.information(
+                self,
+                'Restore Complete',
+                'Database has been restored from backup.\n\nPlease restart the server for changes to take effect.'
+            )
+        except Exception as e:
+            QMessageBox.critical(self, 'Restore Failed', f'Could not restore database: {e}')
 
     def get_values(self):
         return {
@@ -1248,11 +1751,6 @@ class ClientSyncConfigDialog(QDialog):
 
         layout.addWidget(sync_group)
 
-        # Test connection button
-        self.test_btn = QPushButton("Test Connection")
-        self.test_btn.clicked.connect(self.test_connection)
-        layout.addWidget(self.test_btn)
-
         # Information section
         info_group = QGroupBox("Information")
         info_layout = QVBoxLayout(info_group)
@@ -1267,6 +1765,11 @@ class ClientSyncConfigDialog(QDialog):
         info_layout.addWidget(info_text)
 
         layout.addWidget(info_group)
+
+        # Test connection button
+        self.test_btn = QPushButton("Test Connection")
+        self.test_btn.clicked.connect(self.test_connection)
+        layout.addWidget(self.test_btn)
 
         # Status label
         self.status_label = QLabel("")
@@ -1393,10 +1896,10 @@ class ClientSyncConfigDialog(QDialog):
 class PinDialog(QDialog):
     """Dialog for PIN entry and setting"""
 
-    def __init__(self, parent=None, is_setting_pin=False):
+    def __init__(self, parent=None, set_flag=False):
         super().__init__(parent)
-        self.is_setting_pin = is_setting_pin
-        self.setWindowTitle("Set PIN" if is_setting_pin else "Enter PIN")
+        self.is_setting_pin = set_flag
+        self.setWindowTitle("Set PIN" if set_flag else "Enter PIN")
         # self.setFixedSize(350, 200)
 
         layout = QVBoxLayout(self)
@@ -1406,7 +1909,7 @@ class PinDialog(QDialog):
         group_layout = QFormLayout(group_box)
 
         # Header
-        if is_setting_pin:
+        if set_flag:
             header_text = "Set Your PIN"
             instruction_text = "Please set a 4-digit PIN for secure clock operations:"
         else:
@@ -1416,7 +1919,7 @@ class PinDialog(QDialog):
         header_label.setFont(fonts["header"])
         layout.addWidget(header_label)
 
-        if is_setting_pin:
+        if set_flag:
             info_label = QLabel(instruction_text)
             info_label.setWordWrap(True)
             info_label.setStyleSheet('color: #666; margin-bottom: 10px;')
@@ -1431,7 +1934,7 @@ class PinDialog(QDialog):
         group_layout.addRow("PIN:", self.pin_input)
 
         # Confirm PIN input (only for setting)
-        if is_setting_pin:
+        if set_flag:
             self.confirm_pin_input = QLineEdit()
             self.confirm_pin_input.setEchoMode(QLineEdit.EchoMode.Password)
             self.confirm_pin_input.setMaxLength(4)

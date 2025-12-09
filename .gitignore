@@ -1,8 +1,12 @@
 
-*.db
 .vscode/*
-*.pyc
+.github/*
 build/*
+__pycache__/*
+*.db
+*.pyc
+._*
+.DS_Store
 ico.png
 2.0.md
 *.log

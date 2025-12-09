@@ -77,6 +77,9 @@ class BigTimeClient(QObject):
             return self.update_employee_badge(badge, updates)
         else:
             success = db_helpers.update_employee_by_badge(badge, updates)
+            if success:
+                # Track the change for sync
+                db_helpers.track_change('employee_update', badge)
 
             # Note: Employee sync is handled by NetworkWorker
 

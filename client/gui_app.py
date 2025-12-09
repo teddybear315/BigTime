@@ -24,14 +24,19 @@ from shared.models import Employee
 from shared.utils import get_data_path, get_resource_path
 from ui.dialogs import (AddEmployeeDialog, ClientSyncConfigDialog,
                         DateRangeDialog, EditEmployeeDialog, EditLogsDialog,
-                        OOTBClientDialog, SettingsDialog)
+                        OOTBClientDialog, SettingsDialog, EditTimeSelectorDialog)
 from ui.fonts import fonts
 
 
 class BigTimeClientApp(QMainWindow):
     """Main BigTime client application window"""
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize BigTime client application.
+
+        Sets up minimal UI immediately, then schedules async initialization
+        to prevent blocking and allow window to appear quickly.
+        """
         super().__init__()
 
         # Setup standardized logging
@@ -57,8 +62,12 @@ class BigTimeClientApp(QMainWindow):
         # Schedule heavy initialization after UI is shown
         QTimer.singleShot(10, self.initialize_application_async)
 
-    def setup_minimal_ui(self):
-        """Setup minimal UI that shows immediately"""
+    def setup_minimal_ui(self) -> None:
+        """Setup minimal UI for quick initial display.
+
+        Creates basic window layout with loading message before performing
+        heavy initialization. Allows window to appear immediately.
+        """
         from shared.utils import create_app_icon
 
         self.setWindowTitle('BigTime - Loading...')
@@ -84,19 +93,38 @@ class BigTimeClientApp(QMainWindow):
         self.progress_label.setStyleSheet('font-size: 12px; color: #666; margin: 10px;')
         layout.addWidget(self.progress_label)
 
-    def show_loading_state(self):
-        """Show loading state immediately"""
+    def show_loading_state(self) -> None:
+        """Display loading state UI immediately.
+
+        Shows window with loading message and forces UI update to ensure
+        window appears before heavy initialization begins.
+        """
         self.show()
         QApplication.processEvents()  # Force UI update
 
-    def update_loading_progress(self, message):
-        """Update loading progress message"""
+    def update_loading_progress(self, message: str) -> None:
+        """Update loading progress message.
+
+        Args:
+            message: Status message to display during initialization
+        """
         if hasattr(self, 'progress_label'):
             self.progress_label.setText(message)
             QApplication.processEvents()  # Force UI update
 
-    def initialize_application_async(self):
-        """Initialize application components asynchronously"""
+    def initialize_application_async(self) -> None:
+        """Initialize application components asynchronously.
+
+        Performs all initialization after minimal UI is shown:
+        - Create and configure client instance
+        - Setup full UI layout
+        - Load persistent settings
+        - Start background network worker
+        - Handle manager PIN setup if needed
+
+        This deferred initialization allows UI to appear immediately,
+        then load data in background without blocking.
+        """
         try:
             # Initialize client (no network operations)
             self.update_loading_progress('Initializing client...')
@@ -118,13 +146,12 @@ class BigTimeClientApp(QMainWindow):
             if hasattr(self, 'progress_label'):
                 self.progress_label.setText(f'Error: {str(e)}')
 
-    def setup_network_worker(self):
+    def setup_network_worker(self) -> None:
         """Setup network worker in background thread"""
         try:
             # Create network worker
+            # NetworkWorker is implemented as a QThread subclass; start it directly
             self.network_worker = NetworkWorker(client=self.client)
-            self.network_thread = QThread()
-            self.network_worker.moveToThread(self.network_thread)
 
             # Connect signals from network worker to GUI
             self.network_worker.sync_status_changed.connect(self.on_sync_status_changed)
@@ -134,12 +161,8 @@ class BigTimeClientApp(QMainWindow):
             self.network_worker.tick.connect(self.update_clock)
             self.network_worker.clear_status.connect(self.clear_status_message)
 
-            # Connect thread lifecycle
-            self.network_thread.started.connect(self.network_worker.run)
-            self.network_thread.finished.connect(self.network_worker.deleteLater)
-
-            # Start the network thread
-            self.network_thread.start()
+            # Start the worker thread
+            self.network_worker.start()
 
             # Delay sync service start to allow OOTB setup to complete first
             # Only auto-start if not in OOTB setup (OOTB will manually start after config)
@@ -171,7 +194,8 @@ class BigTimeClientApp(QMainWindow):
             # Request network operations (non-blocking)
             if hasattr(self, 'network_worker'):
                 self.network_worker.check_server_connection.emit()
-                self.network_worker.fetch_server_info.emit()
+                # Delay fetch_server_info to allow worker thread to fully initialize
+                QTimer.singleShot(500, lambda: self.network_worker.fetch_server_info.emit())
 
         except Exception as e:
             if hasattr(self, 'progress_label'):
@@ -179,8 +203,13 @@ class BigTimeClientApp(QMainWindow):
 
 
 
-    def load_settings(self):
-        """Load application settings from client"""
+    def load_settings(self) -> None:
+        """Load application settings from client.
+
+        Loads configuration including company name, manager PIN, report save path,
+        and other persistent settings from the local client database.
+        Sets UI state based on loaded settings.
+        """
         # Load core settings first (these should always work from local DB)
         try:
             self.manager_pin = self.client.get_setting('manager_pin', '')
@@ -197,7 +226,8 @@ class BigTimeClientApp(QMainWindow):
 
         # Set default company name from local settings (non-blocking)
         try:
-            self.company_name = self.client.get_setting('company_name', 'BigTime')
+            company_name = self.client.get_setting('company_name', 'BigTime')
+            self.company_name = str(company_name).strip() if company_name else 'BigTime'
         except Exception:
             self.company_name = 'BigTime'
 
@@ -216,7 +246,11 @@ class BigTimeClientApp(QMainWindow):
         """Setup the main user interface"""
         from shared.utils import create_app_icon
 
-        self.setWindowTitle(f'{self.company_name} - BigTime')
+        # Set window title: only prepend company name if it's not the default 'BigTime'
+        if self.company_name and self.company_name != 'BigTime':
+            self.setWindowTitle(f'{self.company_name} - BigTime')
+        else:
+            self.setWindowTitle('BigTime')
         self.setWindowIcon(create_app_icon())
         # self.setMinimumSize(420, 420)
 
@@ -334,14 +368,14 @@ class BigTimeClientApp(QMainWindow):
         # Initialize footer sync status display
         try:
             self.update_footer_sync_status()
-        except Exception:
-            # If sync service not available yet, ignore
-            pass
+        except Exception as e:
+            # If sync service not available yet, log and continue
+            self.logger.debug(f"Sync status not available during init: {e}")
 
     def update_clock(self):
         """Update the clock display in the title label"""
         if hasattr(self, 'clock') and self.clock:
-            self.clock.setText(f'{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}')
+            self.clock.setText(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     def smart_clock_action(self):
         """Smart clock in/out based on employee's current status"""
@@ -375,49 +409,49 @@ class BigTimeClientApp(QMainWindow):
         """Setup application menu"""
         menubar = self.menuBar()
 
-        # Exit action
-        exit_action = QAction('Exit', self)
-        exit_action.triggered.connect(self.close)
-        menubar.addAction(exit_action)
+        app_menu = menubar.addMenu('BigTime')
+        settings_action = QAction('Settings...', self)
+        settings_action.triggered.connect(self.edit_settings)
+        app_menu.addAction(settings_action)
 
+        # Exit action
+        exit_action = QAction("Quit...", self)
+        exit_action.triggered.connect(self.close)
+        app_menu.addAction(exit_action)
+
+        manager_menu = menubar.addMenu('Manager')
         # Moderator menu
-        self.manager_login = QAction('Manager', self)
+        self.manager_login = QAction('Login...', self)
         self.manager_login.triggered.connect(self.validate_manager_access)
-        menubar.addAction(self.manager_login)
+        manager_menu.addAction(self.manager_login)
 
         # Maintenance menu
         self.maintenance_menu = menubar.addMenu('Maintenance')
-
-        add_emp_action = QAction('Add Employee', self)
-        add_emp_action.triggered.connect(self.add_employee)
-        self.maintenance_menu.addAction(add_emp_action)
 
         view_emp_action = QAction('View Employees', self)
         view_emp_action.triggered.connect(self.view_employees)
         self.maintenance_menu.addAction(view_emp_action)
 
-        # Tools menu
-        self.tools_menu = menubar.addMenu('Tools')
+        add_emp_action = QAction('Add Employee...', self)
+        add_emp_action.triggered.connect(self.add_employee)
+        self.maintenance_menu.addAction(add_emp_action)
+
+        self.maintenance_menu.addSeparator()
 
         view_logs_action = QAction('View Time Logs', self)
         view_logs_action.triggered.connect(self.view_time_logs)
-        self.tools_menu.addAction(view_logs_action)
+        self.maintenance_menu.addAction(view_logs_action)
 
-        edit_times_action = QAction('Edit Time Logs', self)
+        edit_times_action = QAction('Edit Time Logs...', self)
         edit_times_action.triggered.connect(self.edit_times)
-        self.tools_menu.addAction(edit_times_action)
+        self.maintenance_menu.addAction(edit_times_action)
 
-        self.tools_menu.addSeparator()
+        # Tools menu
+        self.tools_menu = menubar.addMenu('Tools')
 
-        settings_action = QAction('Settings', self)
-        settings_action.triggered.connect(self.edit_settings)
-        self.tools_menu.addAction(settings_action)
-
-        server_config_action = QAction('Server Configuration', self)
+        server_config_action = QAction('Server Configuration...', self)
         server_config_action.triggered.connect(self.configure_server)
         self.tools_menu.addAction(server_config_action)
-
-        self.tools_menu.addSeparator()
 
         sync_now_action = QAction('Sync Now', self)
         sync_now_action.triggered.connect(self.sync_now)
@@ -430,13 +464,17 @@ class BigTimeClientApp(QMainWindow):
         # Reporting menu
         self.reporting_menu = menubar.addMenu('Reporting')
 
-        gen_report_action = QAction('Generate Report', self)
+        gen_report_action = QAction('Generate Report...', self)
         gen_report_action.triggered.connect(self.generate_report)
         self.reporting_menu.addAction(gen_report_action)
 
         backup_db_action = QAction('Backup Database', self)
         backup_db_action.triggered.connect(self.backup_database)
         self.reporting_menu.addAction(backup_db_action)
+
+        restore_db_action = QAction('Restore from Backup', self)
+        restore_db_action.triggered.connect(self.restore_database)
+        self.reporting_menu.addAction(restore_db_action)
 
     def check_manager_settings(self):
         """Check settings using client; ensure manager_pin exists"""
@@ -474,6 +512,9 @@ class BigTimeClientApp(QMainWindow):
             self.client.set_setting('report_save_path', values['report_save_path'])
             self.client.set_setting('manager_password', values['manager_pin'])
             self.client.set_setting('manager_password_ootb', '0')
+            # Initialize company_name setting if not already set
+            if not self.client.get_setting('company_name'):
+                self.client.set_setting('company_name', 'BigTime')
 
             self.logger.info("OOTB setup completed - saved manager_password_ootb=0")
 
@@ -516,6 +557,8 @@ class BigTimeClientApp(QMainWindow):
             if values['enable_sync'] and hasattr(self, 'network_worker') and self.network_worker:
                 self.logger.info("OOTB complete - starting sync service")
                 QTimer.singleShot(100, lambda: self.network_worker.start_sync_service.emit())
+                # Fetch server info to get company name and other config
+                QTimer.singleShot(1000, lambda: self.network_worker.fetch_server_info.emit())
 
             break
 
@@ -523,7 +566,7 @@ class BigTimeClientApp(QMainWindow):
         """Handle moderator menu authentication"""
         if not self.is_moderator:
             from ui.dialogs import PinDialog
-            pin_dialog = PinDialog(self, is_setting_pin=False)
+            pin_dialog = PinDialog(self, set_flag=False)
             pin_dialog.setWindowTitle("Manager Authentication")
 
             if pin_dialog.exec() == QDialog.DialogCode.Accepted:
@@ -577,7 +620,7 @@ class BigTimeClientApp(QMainWindow):
         if not employee.pin or employee.pin.strip() == '':
             # Employee has no PIN set - prompt to set one
             from ui.dialogs import PinDialog
-            pin_dialog = PinDialog(self, is_setting_pin=True)
+            pin_dialog = PinDialog(self, set_flag=True)
             if pin_dialog.exec() == QDialog.DialogCode.Accepted:
                 new_pin = pin_dialog.get_pin()
                 # Update employee PIN only
@@ -597,7 +640,7 @@ class BigTimeClientApp(QMainWindow):
         else:
             # Employee has PIN - prompt to enter it
             from ui.dialogs import PinDialog
-            pin_dialog = PinDialog(self, is_setting_pin=False)
+            pin_dialog = PinDialog(self, set_flag=False)
             if pin_dialog.exec() == QDialog.DialogCode.Accepted:
                 entered_pin = pin_dialog.get_pin()
                 if entered_pin != employee.pin:
@@ -614,8 +657,7 @@ class BigTimeClientApp(QMainWindow):
         result = self.client.clock_in(badge)
 
         if result['success']:
-            employee_name = result.get('employee_name', 'Employee')
-            self.set_status_with_autoclear(f'✅ {employee_name} clocked in successfully')
+            self.set_status_with_autoclear(f'✅ {result["message"]}')
             # Trigger immediate sync for new time log
             if hasattr(self, 'network_worker') and self.network_worker:
                 self.network_worker.time_log_data_changed.emit()
@@ -650,7 +692,7 @@ class BigTimeClientApp(QMainWindow):
         if not employee.pin or employee.pin.strip() == '':
             # Employee has no PIN set - prompt to set one
             from ui.dialogs import PinDialog
-            pin_dialog = PinDialog(self, is_setting_pin=True)
+            pin_dialog = PinDialog(self, set_flag=True)
             if pin_dialog.exec() == QDialog.DialogCode.Accepted:
                 new_pin = pin_dialog.get_pin()
                 # Update employee PIN only
@@ -670,7 +712,7 @@ class BigTimeClientApp(QMainWindow):
         else:
             # Employee has PIN - prompt to enter it
             from ui.dialogs import PinDialog
-            pin_dialog = PinDialog(self, is_setting_pin=False)
+            pin_dialog = PinDialog(self, set_flag=False)
             if pin_dialog.exec() == QDialog.DialogCode.Accepted:
                 entered_pin = pin_dialog.get_pin()
                 if entered_pin != employee.pin:
@@ -687,10 +729,7 @@ class BigTimeClientApp(QMainWindow):
         result = self.client.clock_out(badge)
 
         if result['success']:
-            employee_name = result.get('employee_name', 'Employee')
-            self.set_status_with_autoclear(
-                f'✅ {employee_name} clocked out successfully.'
-            )
+            self.set_status_with_autoclear(f'✅ {result["message"]}')
             # Trigger immediate sync for updated time log
             if hasattr(self, 'network_worker') and self.network_worker:
                 self.network_worker.time_log_data_changed.emit()
@@ -751,182 +790,7 @@ class BigTimeClientApp(QMainWindow):
 
     def edit_times(self):
         """Show time editing interface"""
-        dlg = QDialog(self)
-        dlg.setWindowTitle('Edit Time Logs')
-        dlg.setFixedWidth(400)
-        dlg.resize(400, 600)
-        layout = QVBoxLayout(dlg)
-
-        # Employee selection section
-        title = QLabel('Time Log Editor')
-        title.setFont(fonts["header"])
-        sub_title = QLabel('Select an employee and press load logs.')
-        sub_title.setFont(fonts["small"])
-        sub_title.setStyleSheet('color: #666;')
-        sub_title.setWordWrap(True)
-
-        layout.addWidget(title)
-        layout.addWidget(sub_title)
-
-        emp_label = QLabel('Select Employee:')
-        layout.addWidget(emp_label)
-
-        emp_table = QTableWidget()
-        emp_table.setColumnCount(2)
-        emp_table.setHorizontalHeaderLabels(['ID', 'Name'])
-        emp_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        emp_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        emp_table.setColumnWidth(0, 40)
-        emp_table.setColumnWidth(1, 320)
-        layout.addWidget(emp_table)
-
-        # Controls row (date selector and load button)
-        controls_row = QHBoxLayout()
-        date_label = QLabel('Date:')
-        date_edit = QDateEdit()
-        date_edit.setCalendarPopup(True)
-        date_edit.setDate(QDate.currentDate())
-        load_btn = QPushButton('Load Logs')
-
-        controls_row.addWidget(date_label)
-        controls_row.addWidget(date_edit)
-        controls_row.addWidget(load_btn)
-        controls_row.addStretch()
-        layout.addLayout(controls_row)
-
-        # Logs table section
-        logs_table = QTableWidget()
-        logs_table.setColumnCount(4)
-        logs_table.setHorizontalHeaderLabels(['ID', 'Clock In', 'Clock Out', ''])
-        logs_table.setColumnWidth(0, 40)
-        logs_table.setColumnWidth(1, 120)
-        logs_table.setColumnWidth(2, 120)
-        logs_table.setColumnWidth(3, 80)
-        layout.addWidget(logs_table)
-
-        # Bottom buttons
-        btn_row = QHBoxLayout()
-        close_btn = QPushButton('Close')
-        btn_row.addStretch()
-        btn_row.addWidget(close_btn)
-        layout.addLayout(btn_row)
-
-        def load_employees():
-            """Load employees into the employee table"""
-            try:
-                employees = self.client.get_all_employees()
-                emp_table.setRowCount(len(employees))
-
-                for r, emp in enumerate(employees):
-                    badge = emp.badge
-                    name = emp.name
-
-                    badge_item = QTableWidgetItem(badge)
-                    badge_item.setFlags(badge_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                    # Store the employee object for later use
-                    badge_item.setData(Qt.ItemDataRole.UserRole, emp)
-
-                    name_item = QTableWidgetItem(name)
-                    name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-
-                    emp_table.setItem(r, 0, badge_item)
-                    emp_table.setItem(r, 1, name_item)
-
-            except Exception as e:
-                QMessageBox.critical(dlg, 'Error', f'Failed to load employees: {str(e)}')
-
-        def load_logs_for_selected():
-            """Load logs for the selected employee and date"""
-            selected = emp_table.selectedItems()
-            if not selected:
-                QMessageBox.warning(dlg, 'Select Employee', 'Please select an employee from the list.')
-                return
-
-            try:
-                # Get the employee from the stored data
-                badge_item = emp_table.item(selected[0].row(), 0)
-                employee = badge_item.data(Qt.ItemDataRole.UserRole)
-                badge_text = employee.badge
-
-                # Get the selected date
-                qdate = date_edit.date()
-                selected_date = date(qdate.year(), qdate.month(), qdate.day())
-
-                # Fetch logs for this employee and date
-                logs = self.client.get_logs_for_range(badge_text, selected_date, selected_date)
-
-                logs_table.setRowCount(len(logs))
-
-                for r, log in enumerate(logs):
-                    # ID column
-                    id_item = QTableWidgetItem(str(log.id))
-                    id_item.setFlags(id_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                    logs_table.setItem(r, 0, id_item)
-
-                    # Clock In column
-                    clock_in_text = log.clock_in if log.clock_in else ''
-                    ci_item = QTableWidgetItem(clock_in_text)
-                    ci_item.setFlags(ci_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                    logs_table.setItem(r, 1, ci_item)
-
-                    # Clock Out column
-                    clock_out_text = log.clock_out if log.clock_out else ''
-                    co_item = QTableWidgetItem(clock_out_text)
-                    co_item.setFlags(co_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                    logs_table.setItem(r, 2, co_item)
-
-                    # Edit button
-                    edit_btn = QPushButton('Edit')
-                    edit_btn.clicked.connect(lambda checked, log_obj=log: edit_single_log(log_obj))
-                    logs_table.setCellWidget(r, 3, edit_btn)
-
-            except Exception as e:
-                QMessageBox.critical(dlg, 'Error', f'Failed to load logs: {str(e)}')
-
-        def edit_single_log(log):
-            """Edit a single time log entry"""
-            try:
-                # Convert log to format expected by EditLogsDialog
-                log_data = [(log.id, log.clock_in, log.clock_out)]
-
-                # Use local timezone for time display
-                edit_dlg = EditLogsDialog(log_data, dlg, server_timezone='UTC')
-
-                # Connect to the log_removed signal to handle log deletion
-                def handle_log_removal(removed_log_id):
-                    try:
-                        # Delete the log from the database
-                        success = self.client.delete_time_log(removed_log_id)
-                        if success:
-                            # Refresh the logs table to show the removal
-                            load_logs_for_selected()
-                        else:
-                            QMessageBox.warning(dlg, 'Warning', 'Failed to remove log entry.')
-                    except Exception as e:
-                        QMessageBox.critical(dlg, 'Error', f'Failed to remove log: {str(e)}')
-
-                edit_dlg.log_removed.connect(handle_log_removal)
-
-                if edit_dlg.exec() == QDialog.DialogCode.Accepted:
-                    # Process the updates
-                    updates = edit_dlg.get_updates()
-                    if updates:
-                        log_id, new_clock_in, new_clock_out = updates[0]
-                        self.client.update_time_log(log_id, new_clock_in, new_clock_out)
-                        # Refresh the logs table
-                        load_logs_for_selected()
-
-            except Exception as e:
-                QMessageBox.critical(dlg, 'Error', f'Failed to edit log: {str(e)}')
-
-        # Connect signals
-        load_btn.clicked.connect(load_logs_for_selected)
-        close_btn.clicked.connect(dlg.accept)
-
-        # Load initial data
-        load_employees()
-
-        # Show dialog
+        dlg = EditTimeSelectorDialog(self.client, self)
         dlg.exec()
 
     def edit_settings(self):
@@ -992,6 +856,8 @@ class BigTimeClientApp(QMainWindow):
                 self.set_status_with_autoclear('✅ Server configuration updated')
                 # Test connection in background
                 self.network_worker.check_server_connection.emit()
+                # Fetch server info to get updated company name
+                QTimer.singleShot(500, lambda: self.network_worker.fetch_server_info.emit())
             else:
                 self.set_status_with_autoclear('📴 Server synchronization disabled')
 
@@ -1005,8 +871,8 @@ class BigTimeClientApp(QMainWindow):
             try:
                 if hasattr(self, 'update_footer_sync_status'):
                     self.update_footer_sync_status(status_dict)
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.debug(f"Failed to update footer sync status: {e}")
 
         except Exception as e:
             self.logger.error(f"Error handling sync status update: {e}")
@@ -1035,19 +901,21 @@ class BigTimeClientApp(QMainWindow):
         """Handle server info updates from network worker"""
         try:
             if 'company_name' in server_info:
-                self.company_name = server_info['company_name']
-                if hasattr(self, 'clock'):
+                self.company_name = str(server_info['company_name']).strip()
+                # Save company name to local database for persistence
+                self.client.set_setting('company_name', self.company_name)
+                # Update title: only prepend company name if it's not the default 'BigTime'
+                if self.company_name and self.company_name != 'BigTime':
                     self.setWindowTitle(f'{self.company_name} - BigTime')
+                else:
+                    self.setWindowTitle('BigTime')
         except Exception as e:
             pass  # Non-critical
 
     def on_connection_status_changed(self, is_connected):
         """Handle connection status changes from network worker"""
-        try:
-            # Update UI to reflect connection status if needed
-            pass
-        except Exception as e:
-            pass  # Non-critical
+        # Currently no UI updates needed for connection status changes
+        pass
 
     def clear_status_message(self):
         """Clear status message - called from network worker"""
@@ -1224,23 +1092,49 @@ class BigTimeClientApp(QMainWindow):
 
     def backup_database(self):
         """Backup the local database"""
-        import shutil
-
-        from shared.db_helpers import get_db_path
-
-        db_path = get_db_path()
-        backup_dir = get_data_path("backups")
-        backup_dir.mkdir(exist_ok=True, parents=True)
-
-        now = datetime.now()
-        backup_name = now.strftime('%m-%d-%Y %H-%M-%S') + '.db'
-        backup_path = backup_dir / backup_name
+        from shared.backup_utils import create_backup
 
         try:
-            shutil.copy2(db_path, backup_path)
+            backup_path = create_backup('bigtime.db')
             QMessageBox.information(self, 'Backup', f'Database backed up as {backup_path}')
         except Exception as e:
             QMessageBox.warning(self, 'Backup Failed', f'Could not backup database: {e}')
+
+    def restore_database(self):
+        """Restore the local database from the most recent backup"""
+        from shared.backup_utils import get_latest_backup_info, restore_from_backup
+
+        # Get the latest backup
+        backup_info = get_latest_backup_info('bigtime.db')
+
+        if not backup_info:
+            QMessageBox.warning(self, 'Restore Failed', 'No backups available.')
+            return
+
+        backup_path, formatted_time = backup_info
+
+        # Confirm with user
+        reply = QMessageBox.question(
+            self,
+            'Restore Database',
+            f'Restore database from backup created on {formatted_time}?\n\n'
+            'Your current database will be backed up before restoring.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            restore_from_backup(backup_path, 'bigtime.db')
+            QMessageBox.information(
+                self,
+                'Restore Complete',
+                'Database has been restored from backup.\n\nPlease restart the application for changes to take effect.'
+            )
+        except Exception as e:
+            QMessageBox.critical(self, 'Restore Failed', f'Could not restore database: {e}')
 
     def closeEvent(self, event):
         """Handle application close"""
@@ -1249,9 +1143,11 @@ class BigTimeClientApp(QMainWindow):
             if hasattr(self, 'network_worker'):
                 self.network_worker.stop_sync_service.emit()
                 self.network_worker.stop()
-            if hasattr(self, 'network_thread') and self.network_thread.isRunning():
-                self.network_thread.quit()
-                self.network_thread.wait(2000)  # Wait up to 2 seconds for clean shutdown
+                # Wait for the thread to finish cleanly
+                try:
+                    self.network_worker.wait(2000)
+                except Exception:
+                    pass
         except Exception:
             pass
 

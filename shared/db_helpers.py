@@ -3,10 +3,8 @@ Database helpers abstraction layer for BigTime application.
 Supports both local SQLite database and remote API operations.
 """
 
-import os
 import re
 import sqlite3
-import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -15,6 +13,15 @@ from shared.models import Employee, PayPeriod, SyncState, TimeLog
 from shared.utils import (format_date, format_datetime, get_data_path,
                           get_resource_path, parse_date, parse_datetime,
                           to_int_optional)
+
+
+# Database configuration constants
+DB_BUSY_TIMEOUT_MS = 5000  # 5 seconds for concurrent access
+BADGE_MAX_LENGTH = 20
+EMPLOYEE_NAME_MAX_LENGTH = 100
+CLIENT_ID_MAX_LENGTH = 100
+DEVICE_ID_MAX_LENGTH = 50
+LOG_QUERY_LIMIT = 100  # Maximum logs to fetch in a single query
 
 
 class DatabaseException(Exception):
@@ -35,8 +42,8 @@ def validate_badge(badge: str) -> str:
     if not re.match(r'^[a-zA-Z0-9_-]+$', badge):
         raise DatabaseException("Badge can only contain letters, numbers, dashes, and underscores")
 
-    if len(badge) > 20:  # Reasonable limit
-        raise DatabaseException("Badge must be 20 characters or less")
+    if len(badge) > BADGE_MAX_LENGTH:
+        raise DatabaseException(f"Badge must be {BADGE_MAX_LENGTH} characters or less")
 
     return badge
 
@@ -59,13 +66,67 @@ def get_db_path() -> Path:
     return get_data_path('bigtime.db')
 
 
+def _row_to_employee(row: sqlite3.Row) -> Employee:
+    """Convert a database row to an Employee object.
+
+    Consolidates employee conversion logic used in multiple query functions.
+
+    Args:
+        row: Database row with employee fields
+
+    Returns:
+        Employee object populated from row data
+    """
+    return Employee(
+        id=row['id'],
+        name=row['name'],
+        badge=row['badge'],
+        phone_number=row['phone_number'],
+        pin=row['pin'] or '',
+        department=row['department'] or '',
+        date_of_birth=parse_date(row['date_of_birth']) if row['date_of_birth'] else None,
+        hire_date=parse_date(row['hire_date']) if row['hire_date'] else None,
+        deactivated=bool(row['deactivated']),
+        ssn=row['ssn'],
+        period=row['period'] or PayPeriod.HOURLY.value,
+        rate=row['rate'] or 0.0
+    )
+
+
+def _row_to_timelog(row: sqlite3.Row) -> TimeLog:
+    """Convert a database row to a TimeLog object.
+
+    Consolidates time log conversion logic used in multiple query functions.
+
+    Args:
+        row: Database row with log fields
+
+    Returns:
+        TimeLog object populated from row data
+    """
+    rd = dict(row)
+    return TimeLog(
+        id=rd['id'],
+        client_id=rd.get('client_id'),
+        remote_id=rd.get('remote_id'),
+        badge=rd['badge'],
+        clock_in=rd['clock_in'],
+        clock_out=rd['clock_out'],
+        device_id=rd.get('device_id'),
+        device_ts=rd.get('device_ts'),
+        sync_state=rd.get('sync_state', SyncState.SYNCED.value),
+        created_at=rd.get('created_at'),
+        updated_at=rd.get('updated_at')
+    )
+
+
 def init_database():
     """Initialize the database with required tables and migrations"""
     db_path = get_db_path()
     conn = sqlite3.connect(str(db_path))
     # Improve concurrency: wait up to 5s on locks and use WAL mode
     try:
-        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA journal_mode = WAL")
     except Exception:
         pass
@@ -139,7 +200,7 @@ def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(str(get_db_path()))
     # Improve concurrency: wait up to 5s on locks
     try:
-        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}")
     except Exception:
         pass
     conn.row_factory = sqlite3.Row
@@ -171,115 +232,82 @@ def set_setting(key: str, value: str):
 
 
 # Employee functions
-def insert_employee_no_tracking(employee: Employee) -> int:
-    """Insert a new employee without change tracking (for server sync)"""
+def _execute_employee_insert(conn: sqlite3.Connection, employee: Employee, track_change_type: Optional[str] = None) -> int:
+    """Execute employee insert with optional change tracking.
+
+    Args:
+        conn: Database connection (should already be in transaction)
+        employee: Employee object to insert
+        track_change_type: Change type to track ('employee_create') or None for no tracking
+
+    Returns:
+        The inserted employee ID
+    """
     # Validate critical fields
     if not employee.name or not employee.name.strip():
         raise DatabaseException("Employee name cannot be empty")
 
     validated_badge = validate_badge(employee.badge)
 
-    if employee.name and len(employee.name) > 100:
-        raise DatabaseException("Employee name must be 100 characters or less")
+    if employee.name and len(employee.name) > EMPLOYEE_NAME_MAX_LENGTH:
+        raise DatabaseException(f"Employee name must be {EMPLOYEE_NAME_MAX_LENGTH} characters or less")
 
+    try:
+        cursor = conn.execute("""
+            INSERT INTO employees (
+                name, badge, phone_number, pin, department,
+                date_of_birth, hire_date, deactivated, ssn, period, rate
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            employee.name.strip(),
+            validated_badge,
+            employee.phone_number,
+            employee.pin,
+            employee.department,
+            format_date(employee.date_of_birth) if employee.date_of_birth else None,
+            format_date(employee.hire_date) if employee.hire_date else None,
+            employee.deactivated,
+            employee.ssn,
+            employee.period,
+            employee.rate
+        ))
+
+        conn.commit()
+        employee_id = cursor.lastrowid
+
+        # Track the change if requested
+        if track_change_type:
+            track_change(track_change_type, validated_badge)
+
+        return employee_id
+
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        if "UNIQUE constraint failed: employees.badge" in str(e):
+            raise DatabaseException(f"Employee with badge '{validated_badge}' already exists")
+        else:
+            raise DatabaseException(f"Employee insert failed due to constraint violation: {e}")
+    except Exception as e:
+        conn.rollback()
+        raise DatabaseException(f"Failed to insert employee: {e}")
+
+
+def insert_employee_no_tracking(employee: Employee) -> int:
+    """Insert a new employee without change tracking (for server sync)"""
     conn = get_connection()
     try:
         conn.execute("BEGIN TRANSACTION")
-
-        try:
-            cursor = conn.execute("""
-                INSERT INTO employees (
-                    name, badge, phone_number, pin, department,
-                    date_of_birth, hire_date, deactivated, ssn, period, rate
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                employee.name.strip(),
-                validated_badge,
-                employee.phone_number,
-                employee.pin,
-                employee.department,
-                format_date(employee.date_of_birth) if employee.date_of_birth else None,
-                format_date(employee.hire_date) if employee.hire_date else None,
-                employee.deactivated,
-                employee.ssn,
-                employee.period,
-                employee.rate
-            ))
-
-            conn.commit()
-            employee_id = cursor.lastrowid
-
-            # No change tracking for server sync
-
-            return employee_id
-
-        except sqlite3.IntegrityError as e:
-            conn.rollback()
-            if "UNIQUE constraint failed: employees.badge" in str(e):
-                raise DatabaseException(f"Employee with badge '{validated_badge}' already exists")
-            else:
-                raise DatabaseException(f"Employee insert failed due to constraint violation: {e}")
-        except Exception as e:
-            conn.rollback()
-            raise DatabaseException(f"Failed to insert employee: {e}")
-
+        return _execute_employee_insert(conn, employee, track_change_type=None)
     finally:
         conn.close()
 
 
 def insert_employee(employee: Employee) -> int:
     """Insert a new employee and return the ID"""
-    # Validate critical fields
-    if not employee.name or not employee.name.strip():
-        raise DatabaseException("Employee name cannot be empty")
-
-    validated_badge = validate_badge(employee.badge)
-
-    if employee.name and len(employee.name) > 100:
-        raise DatabaseException("Employee name must be 100 characters or less")
-
     conn = get_connection()
     try:
         conn.execute("BEGIN TRANSACTION")
-
-        try:
-            cursor = conn.execute("""
-                INSERT INTO employees (
-                    name, badge, phone_number, pin, department,
-                    date_of_birth, hire_date, deactivated, ssn, period, rate
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                employee.name.strip(),
-                validated_badge,
-                employee.phone_number,
-                employee.pin,
-                employee.department,
-                format_date(employee.date_of_birth) if employee.date_of_birth else None,
-                format_date(employee.hire_date) if employee.hire_date else None,
-                employee.deactivated,
-                employee.ssn,
-                employee.period,
-                employee.rate
-            ))
-
-            conn.commit()
-            employee_id = cursor.lastrowid
-
-            # Track the change for sync
-            track_change('employee_create', validated_badge)
-
-            return employee_id
-
-        except sqlite3.IntegrityError as e:
-            conn.rollback()
-            if "UNIQUE constraint failed: employees.badge" in str(e):
-                raise DatabaseException(f"Employee with badge '{validated_badge}' already exists")
-            else:
-                raise DatabaseException(f"Employee insert failed due to constraint violation: {e}")
-        except Exception as e:
-            conn.rollback()
-            raise DatabaseException(f"Failed to insert employee: {e}")
-
+        return _execute_employee_insert(conn, employee, track_change_type='employee_create')
     finally:
         conn.close()
 
@@ -290,23 +318,15 @@ def get_employee_by_badge(badge: str) -> Optional[Employee]:
 
     conn = get_connection()
     try:
-        cursor = conn.execute("SELECT * FROM employees WHERE badge = ?", (validated_badge,))
+        cursor = conn.execute("""
+            SELECT id, name, badge, phone_number, pin, department, date_of_birth,
+                   hire_date, deactivated, ssn, period, rate
+            FROM employees
+            WHERE badge = ?
+        """, (validated_badge,))
         row = cursor.fetchone()
         if row:
-            return Employee(
-                id=row['id'],
-                name=row['name'],
-                badge=row['badge'],
-                phone_number=row['phone_number'],
-                pin=row['pin'] or '',
-                department=row['department'] or '',
-                date_of_birth=parse_date(row['date_of_birth']) if row['date_of_birth'] else None,
-                hire_date=parse_date(row['hire_date']) if row['hire_date'] else None,
-                deactivated=bool(row['deactivated']),
-                ssn=row['ssn'],
-                period=row['period'] or PayPeriod.HOURLY.value,
-                rate=row['rate'] or 0.0
-            )
+            return _row_to_employee(row)
         return None
     finally:
         conn.close()
@@ -316,78 +336,29 @@ def fetch_all_employees() -> List[Employee]:
     """Fetch all employees"""
     conn = get_connection()
     try:
-        cursor = conn.execute("SELECT * FROM employees ORDER BY name")
-        employees = []
-        for row in cursor.fetchall():
-            employees.append(Employee(
-                id=row['id'],
-                name=row['name'],
-                badge=row['badge'],
-                phone_number=row['phone_number'],
-                pin=row['pin'] or '',
-                department=row['department'] or '',
-                date_of_birth=parse_date(row['date_of_birth']) if row['date_of_birth'] else None,
-                hire_date=parse_date(row['hire_date']) if row['hire_date'] else None,
-                deactivated=bool(row['deactivated']),
-                ssn=row['ssn'],
-                period=row['period'] or PayPeriod.HOURLY.value,
-                rate=row['rate'] or 0.0
-            ))
-        return employees
+        cursor = conn.execute("""
+            SELECT id, name, badge, phone_number, pin, department, date_of_birth,
+                   hire_date, deactivated, ssn, period, rate
+            FROM employees
+            ORDER BY name
+        """)
+        return [_row_to_employee(row) for row in cursor.fetchall()]
     finally:
         conn.close()
 
 
-def update_employee_by_badge_no_tracking(badge: str, updates: Dict[str, Any]) -> bool:
-    """Update employee by badge without change tracking (for server sync)"""
-    conn = get_connection()
-    try:
-        conn.execute("BEGIN TRANSACTION")
+def _execute_employee_update(conn: sqlite3.Connection, badge: str, updates: Dict[str, Any], track_change_type: Optional[str] = None) -> bool:
+    """Execute employee update with optional change tracking.
 
-        try:
-            # Remove any fields that shouldn't be directly updated
-            safe_updates = {k: v for k, v in updates.items() if k in [
-                'name', 'phone_number', 'pin', 'department', 'date_of_birth',
-                'hire_date', 'deactivated', 'ssn', 'period', 'rate'
-            ]}
+    Args:
+        conn: Database connection (should already be in transaction)
+        badge: Employee badge to update
+        updates: Dictionary of fields to update
+        track_change_type: Change type to track ('employee_update') or None for no tracking
 
-            if not safe_updates:
-                raise DatabaseException("No valid fields to update")
-
-            # Format dates properly
-            if 'date_of_birth' in safe_updates and safe_updates['date_of_birth']:
-                safe_updates['date_of_birth'] = format_date(safe_updates['date_of_birth'])
-            if 'hire_date' in safe_updates and safe_updates['hire_date']:
-                safe_updates['hire_date'] = format_date(safe_updates['hire_date'])
-
-            # Build safe SET clause using only validated field names
-            set_clause = ', '.join([f"{key} = ?" for key in safe_updates.keys()])
-            values = list(safe_updates.values()) + [badge]
-
-            cursor = conn.execute(f"""
-                UPDATE employees SET {set_clause} WHERE badge = ?
-            """, values)
-
-            conn.commit()
-            updated = cursor.rowcount > 0
-
-            # No change tracking for server sync
-
-            return updated
-
-        except Exception as e:
-            conn.rollback()
-            raise DatabaseException(f"Failed to update employee: {e}")
-
-    finally:
-        conn.close()
-
-
-def update_employee_by_badge(badge: str, updates: Dict[str, Any]) -> bool:
-    """Update employee by badge"""
-    if not updates:
-        return False
-
+    Returns:
+        True if update was successful
+    """
     # Validate allowed fields to prevent SQL injection
     allowed_fields = {
         'name', 'badge', 'phone_number', 'pin', 'department',
@@ -399,39 +370,58 @@ def update_employee_by_badge(badge: str, updates: Dict[str, Any]) -> bool:
     if not safe_updates:
         raise DatabaseException(f"No valid fields to update. Allowed fields: {allowed_fields}")
 
+    try:
+        # Format dates properly
+        if 'date_of_birth' in safe_updates and safe_updates['date_of_birth']:
+            safe_updates['date_of_birth'] = format_date(safe_updates['date_of_birth'])
+        if 'hire_date' in safe_updates and safe_updates['hire_date']:
+            safe_updates['hire_date'] = format_date(safe_updates['hire_date'])
+
+        # Build safe SET clause using only validated field names
+        set_clause = ', '.join([f"{key} = ?" for key in safe_updates.keys()])
+        values = list(safe_updates.values()) + [badge]
+
+        cursor = conn.execute(f"""
+            UPDATE employees SET {set_clause} WHERE badge = ?
+        """, values)
+
+        conn.commit()
+        updated = cursor.rowcount > 0
+
+        # Track the change if requested
+        if updated and track_change_type:
+            import json
+            track_change(track_change_type, badge, json.dumps(safe_updates))
+
+        return updated
+
+    except Exception as e:
+        conn.rollback()
+        raise DatabaseException(f"Failed to update employee: {e}")
+
+
+def update_employee_by_badge_no_tracking(badge: str, updates: Dict[str, Any]) -> bool:
+    """Update employee by badge without change tracking (for server sync)"""
+    if not updates:
+        return False
+
     conn = get_connection()
     try:
         conn.execute("BEGIN TRANSACTION")
+        return _execute_employee_update(conn, badge, updates, track_change_type=None)
+    finally:
+        conn.close()
 
-        try:
-            # Convert dates to strings
-            if 'date_of_birth' in safe_updates and safe_updates['date_of_birth']:
-                safe_updates['date_of_birth'] = format_date(safe_updates['date_of_birth'])
-            if 'hire_date' in safe_updates and safe_updates['hire_date']:
-                safe_updates['hire_date'] = format_date(safe_updates['hire_date'])
 
-            # Build safe SET clause using only validated field names
-            set_clause = ', '.join([f"{key} = ?" for key in safe_updates.keys()])
-            values = list(safe_updates.values()) + [badge]
+def update_employee_by_badge(badge: str, updates: Dict[str, Any]) -> bool:
+    """Update employee by badge"""
+    if not updates:
+        return False
 
-            cursor = conn.execute(f"""
-                UPDATE employees SET {set_clause} WHERE badge = ?
-            """, values)
-
-            conn.commit()
-            updated = cursor.rowcount > 0
-
-            # Track the change for sync if update was successful
-            if updated:
-                import json
-                track_change('employee_update', badge, json.dumps(safe_updates))
-
-            return updated
-
-        except Exception as e:
-            conn.rollback()
-            raise DatabaseException(f"Failed to update employee: {e}")
-
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN TRANSACTION")
+        return _execute_employee_update(conn, badge, updates, track_change_type='employee_update')
     finally:
         conn.close()
 
@@ -582,23 +572,7 @@ def get_logs_by_badge(badge: str) -> List[TimeLog]:
             """,
             (validated_badge,)
         )
-        logs: List[TimeLog] = []
-        for row in cursor.fetchall():
-            rd = dict(row)
-            logs.append(TimeLog(
-                id=rd['id'],
-                client_id=rd.get('client_id'),
-                remote_id=rd.get('remote_id'),
-                badge=rd['badge'],
-                clock_in=rd['clock_in'],
-                clock_out=rd['clock_out'],
-                device_id=rd.get('device_id'),
-                device_ts=rd.get('device_ts'),
-                sync_state=rd.get('sync_state', SyncState.SYNCED.value),
-                created_at=rd.get('created_at'),
-                updated_at=rd.get('updated_at')
-            ))
-        return logs
+        return [_row_to_timelog(row) for row in cursor.fetchall()]
     finally:
         conn.close()
 
@@ -713,7 +687,12 @@ def get_log_by_id(log_id: int) -> Optional[Dict[str, Any]]:
     """Get a log entry by ID"""
     conn = get_connection()
     try:
-        cursor = conn.execute("SELECT * FROM logs WHERE id = ?", (log_id,))
+        cursor = conn.execute("""
+            SELECT id, client_id, remote_id, badge, clock_in, clock_out,
+                   device_id, device_ts, sync_state, created_at, updated_at
+            FROM logs
+            WHERE id = ?
+        """, (log_id,))
         row = cursor.fetchone()
         return dict(row) if row else None
     finally:
@@ -739,11 +718,11 @@ def insert_log(badge: str, clock_in_time: str, client_id: Optional[str] = None,
     validated_badge = validate_badge(badge)
     validated_clock_in = validate_datetime_string(clock_in_time, "clock_in_time")
 
-    if client_id and len(client_id) > 100:  # Reasonable limit
-        raise DatabaseException("client_id must be 100 characters or less")
+    if client_id and len(client_id) > CLIENT_ID_MAX_LENGTH:
+        raise DatabaseException(f"client_id must be {CLIENT_ID_MAX_LENGTH} characters or less")
 
-    if device_id and len(device_id) > 50:  # Reasonable limit
-        raise DatabaseException("device_id must be 50 characters or less")
+    if device_id and len(device_id) > DEVICE_ID_MAX_LENGTH:
+        raise DatabaseException(f"device_id must be {DEVICE_ID_MAX_LENGTH} characters or less")
 
     conn = get_connection()
     try:
@@ -831,28 +810,16 @@ def get_open_log_for_badge(badge: str) -> Optional[TimeLog]:
     conn = get_connection()
     try:
         cursor = conn.execute("""
-            SELECT * FROM logs
+            SELECT id, client_id, remote_id, badge, clock_in, clock_out,
+                   device_id, device_ts, sync_state, created_at, updated_at
+            FROM logs
             WHERE badge = ? AND clock_out IS NULL
             ORDER BY clock_in DESC LIMIT 1
         """, (validated_badge,))
         row = cursor.fetchone()
 
         if row:
-            # Convert sqlite3.Row to dict to use .get() method
-            row_dict = dict(row)
-            return TimeLog(
-                id=row_dict['id'],
-                client_id=row_dict.get('client_id'),
-                remote_id=row_dict.get('remote_id'),
-                badge=row_dict['badge'],
-                clock_in=row_dict['clock_in'],
-                clock_out=row_dict['clock_out'],
-                device_id=row_dict.get('device_id'),
-                device_ts=row_dict.get('device_ts'),
-                sync_state=row_dict.get('sync_state', SyncState.SYNCED.value),
-                created_at=row_dict.get('created_at'),
-                updated_at=row_dict.get('updated_at')
-            )
+            return _row_to_timelog(row)
         return None
     finally:
         conn.close()
@@ -863,43 +830,36 @@ def get_pending_logs() -> List[TimeLog]:
     conn = get_connection()
     try:
         cursor = conn.execute("""
-            SELECT * FROM logs
+            SELECT id, client_id, remote_id, badge, clock_in, clock_out,
+                   device_id, device_ts, sync_state, created_at, updated_at
+            FROM logs
             WHERE sync_state = ?
             ORDER BY created_at
         """, (SyncState.PENDING.value,))
 
-        logs = []
-        for row in cursor.fetchall():
-            row_dict = dict(row)
-            logs.append(TimeLog(
-                id=row_dict['id'],
-                client_id=row_dict.get('client_id'),
-                remote_id=row_dict.get('remote_id'),
-                badge=row_dict['badge'],
-                clock_in=row_dict['clock_in'],
-                clock_out=row_dict['clock_out'],
-                device_id=row_dict.get('device_id'),
-                device_ts=row_dict.get('device_ts'),
-                sync_state=row_dict.get('sync_state', SyncState.PENDING.value),
-                created_at=row_dict.get('created_at'),
-                updated_at=row_dict.get('updated_at')
-            ))
-        return logs
+        return [_row_to_timelog(row) for row in cursor.fetchall()]
     finally:
         conn.close()
+
+
+def _validate_and_get_log_sync_state(conn: sqlite3.Connection, log_id: int, target_state: str) -> None:
+    """Validate sync state transition for a log entry.
+
+    Raises DatabaseException if transition is invalid. Used by set_log_synced/set_log_failed.
+    """
+    cursor = conn.execute("SELECT sync_state FROM logs WHERE id = ?", (log_id,))
+    row = cursor.fetchone()
+    if row:
+        current_state = row['sync_state']
+        if not SyncState.is_valid_transition(current_state, target_state):
+            raise DatabaseException(f"Invalid sync state transition from {current_state} to {target_state}")
 
 
 def set_log_synced(log_id: int, remote_id: Optional[int] = None) -> bool:
     """Mark a log as synced"""
     conn = get_connection()
     try:
-        # Validate state transition
-        cursor = conn.execute("SELECT sync_state FROM logs WHERE id = ?", (log_id,))
-        row = cursor.fetchone()
-        if row:
-            current_state = row['sync_state']
-            if not SyncState.is_valid_transition(current_state, SyncState.SYNCED.value):
-                raise DatabaseException(f"Invalid sync state transition from {current_state} to {SyncState.SYNCED.value}")
+        _validate_and_get_log_sync_state(conn, log_id, SyncState.SYNCED.value)
 
         now = format_datetime(datetime.now())
         cursor = conn.execute("""
@@ -917,13 +877,7 @@ def set_log_failed(log_id: int, error: str = "") -> bool:
     """Mark a log as failed to sync"""
     conn = get_connection()
     try:
-        # Validate state transition
-        cursor = conn.execute("SELECT sync_state FROM logs WHERE id = ?", (log_id,))
-        row = cursor.fetchone()
-        if row:
-            current_state = row['sync_state']
-            if not SyncState.is_valid_transition(current_state, SyncState.FAILED.value):
-                raise DatabaseException(f"Invalid sync state transition from {current_state} to {SyncState.FAILED.value}")
+        _validate_and_get_log_sync_state(conn, log_id, SyncState.FAILED.value)
 
         now = format_datetime(datetime.now())
         cursor = conn.execute("""
@@ -963,28 +917,14 @@ def fetch_logs_for_range(badge: str, start_date: date, end_date: date) -> List[T
     conn = get_connection()
     try:
         cursor = conn.execute("""
-            SELECT * FROM logs
+            SELECT id, client_id, remote_id, badge, clock_in, clock_out,
+                   device_id, device_ts, sync_state, created_at, updated_at
+            FROM logs
             WHERE badge = ? AND date(clock_in) BETWEEN ? AND ?
             ORDER BY clock_in
         """, (badge, format_date(start_date), format_date(end_date)))
 
-        logs = []
-        for row in cursor.fetchall():
-            row_dict = dict(row)
-            logs.append(TimeLog(
-                id=row_dict['id'],
-                client_id=row_dict.get('client_id'),
-                remote_id=row_dict.get('remote_id'),
-                badge=row_dict['badge'],
-                clock_in=row_dict['clock_in'],
-                clock_out=row_dict['clock_out'],
-                device_id=row_dict.get('device_id'),
-                device_ts=row_dict.get('device_ts'),
-                sync_state=row_dict.get('sync_state', SyncState.SYNCED.value),
-                created_at=row_dict.get('created_at'),
-                updated_at=row_dict.get('updated_at')
-            ))
-        return logs
+        return [_row_to_timelog(row) for row in cursor.fetchall()]
     finally:
         conn.close()
 
@@ -1000,30 +940,15 @@ def get_all_time_logs() -> List[TimeLog]:
     conn = get_connection()
 
     try:
-        cursor = conn.execute("""
-            SELECT id, badge, clock_in, clock_out, created_at, updated_at
+        cursor = conn.execute(f"""
+            SELECT id, client_id, badge, clock_in, clock_out, device_id,
+                   device_ts, sync_state, remote_id, created_at, updated_at
             FROM logs
             ORDER BY created_at DESC
-            LIMIT 100
+            LIMIT {LOG_QUERY_LIMIT}
         """)
 
-        logs = []
-        for row in cursor.fetchall():
-            row_dict = dict(row)
-            logs.append(TimeLog(
-                id=row_dict['id'],
-                client_id=None,  # Not in basic logs table
-                remote_id=None,  # Not in basic logs table
-                badge=row_dict['badge'],
-                clock_in=row_dict['clock_in'],
-                clock_out=row_dict['clock_out'],
-                device_id=None,  # Not in basic logs table
-                device_ts=None,  # Not in basic logs table
-                sync_state=SyncState.SYNCED.value,  # Default to synced for basic logs
-                created_at=row_dict.get('created_at'),
-                updated_at=row_dict.get('updated_at')
-            ))
-        return logs
+        return [_row_to_timelog(row) for row in cursor.fetchall()]
     finally:
         conn.close()
 
@@ -1120,59 +1045,58 @@ def get_log_by_client_id(client_id: str) -> Optional[TimeLog]:
 
         row = cursor.fetchone()
         if row:
-            return TimeLog(
-                id=row['id'],
-                client_id=row['client_id'],
-                badge=row['badge'],
-                clock_in=row['clock_in'],
-                clock_out=row['clock_out'],
-                device_id=row['device_id'],
-                device_ts=row['device_ts'],
-                sync_state=SyncState(row['sync_state']),
-                remote_id=row['remote_id'],
-                sync_error=None,  # Column doesn't exist in current schema
-                created_at=row['created_at'],
-                updated_at=row['updated_at']
-            )
+            return _row_to_timelog(row)
         return None
     finally:
         conn.close()
 
 
-def update_log_no_tracking(log_id: int, updates: Dict[str, Any]) -> bool:
-    """Update a time log with arbitrary fields without change tracking (for server sync)"""
+def _build_and_execute_log_update(conn: sqlite3.Connection, log_id: int, updates: Dict[str, Any]) -> bool:
+    """Build and execute a dynamic log update query (shared logic).
+
+    Consolidates update logic for both tracked and non-tracked updates.
+
+    Args:
+        conn: Existing database connection (transaction must be started)
+        log_id: Log entry ID to update
+        updates: Dictionary of fields to update
+
+    Returns:
+        bool: True if any rows were updated
+    """
     if not updates:
         return True
 
+    # Build dynamic update query
+    set_clauses = []
+    params = []
+
+    # Always update the updated_at timestamp
+    updates['updated_at'] = format_datetime(datetime.now())
+
+    for field, value in updates.items():
+        if field in ['clock_out', 'updated_at', 'sync_state', 'remote_id', 'sync_error']:
+            set_clauses.append(f"{field} = ?")
+            params.append(value)
+
+    if not set_clauses:
+        return True  # Nothing to update
+
+    params.append(log_id)  # For WHERE clause
+
+    query = f"UPDATE logs SET {', '.join(set_clauses)} WHERE id = ?"
+    cursor = conn.execute(query, params)
+    return cursor.rowcount > 0
+
+
+def update_log_no_tracking(log_id: int, updates: Dict[str, Any]) -> bool:
+    """Update a time log with arbitrary fields without change tracking (for server sync)"""
     conn = get_connection()
     try:
         conn.execute("BEGIN TRANSACTION")
-
-        # Build dynamic update query
-        set_clauses = []
-        params = []
-
-        # Always update the updated_at timestamp
-        updates['updated_at'] = format_datetime(datetime.now())
-
-        for field, value in updates.items():
-            if field in ['clock_out', 'updated_at', 'sync_state', 'remote_id', 'sync_error']:
-                set_clauses.append(f"{field} = ?")
-                params.append(value)
-
-        if not set_clauses:
-            return True  # Nothing to update
-
-        params.append(log_id)  # For WHERE clause
-
-        query = f"UPDATE logs SET {', '.join(set_clauses)} WHERE id = ?"
-        cursor = conn.execute(query, params)
-
+        updated = _build_and_execute_log_update(conn, log_id, updates)
         conn.commit()
-        updated = cursor.rowcount > 0
-
         # No change tracking for server sync
-
         return updated
     finally:
         conn.close()
@@ -1180,35 +1104,11 @@ def update_log_no_tracking(log_id: int, updates: Dict[str, Any]) -> bool:
 
 def update_log(log_id: int, updates: Dict[str, Any]) -> bool:
     """Update a time log with arbitrary fields"""
-    if not updates:
-        return True
-
     conn = get_connection()
     try:
         conn.execute("BEGIN TRANSACTION")
-
-        # Build dynamic update query
-        set_clauses = []
-        params = []
-
-        # Always update the updated_at timestamp
-        updates['updated_at'] = format_datetime(datetime.now())
-
-        for field, value in updates.items():
-            if field in ['clock_out', 'updated_at', 'sync_state', 'remote_id', 'sync_error']:
-                set_clauses.append(f"{field} = ?")
-                params.append(value)
-
-        if not set_clauses:
-            return True  # Nothing to update
-
-        params.append(log_id)  # For WHERE clause
-
-        query = f"UPDATE logs SET {', '.join(set_clauses)} WHERE id = ?"
-        cursor = conn.execute(query, params)
-
+        updated = _build_and_execute_log_update(conn, log_id, updates)
         conn.commit()
-        updated = cursor.rowcount > 0
 
         # Track the change for sync if update was successful
         if updated:
@@ -1229,13 +1129,26 @@ def insert_log_from_object(log: TimeLog) -> Optional[int]:
     else:
         sync_state_value = SyncState.PENDING.value
 
-    return insert_log(
+    # First insert the log with just clock_in
+    log_id = insert_log(
         badge=log.badge,
         clock_in_time=log.clock_in,
         client_id=log.client_id,
         device_id=log.device_id,
         sync_state=sync_state_value
     )
+
+    # If the log has a clock_out, update it immediately (no tracking for server-synced logs)
+    if log_id and log.clock_out:
+        try:
+            update_log_no_tracking(log_id, {'clock_out': log.clock_out})
+        except Exception as e:
+            # Log the error but don't fail the insert
+            import logging
+            logger = logging.getLogger('CLIENT')
+            logger.warning(f"Failed to set clock_out for newly inserted log {log_id}: {e}")
+
+    return log_id
 
 
 # Initialize database on import

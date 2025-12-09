@@ -173,16 +173,33 @@ class ApiResponse:
 # Configuration models
 @dataclass
 class ServerConfig:
-    """Server configuration"""
+    """Server configuration with validation"""
     server_url: str = ""
     device_id: str = ""
     api_key: str = ""
     sync_interval: int = 30  # seconds
     timeout: int = 10  # seconds
 
+    def __post_init__(self) -> None:
+        """Validate configuration after initialization"""
+        # Validate server URL format if provided
+        if self.server_url:
+            if not self.server_url.startswith(('http://', 'https://')):
+                raise ValueError(f"Invalid server URL: must start with http:// or https://")
+
+        # Validate sync interval range
+        if not (5 <= self.sync_interval <= 3600):
+            raise ValueError(f"Sync interval must be between 5 and 3600 seconds, got {self.sync_interval}")
+
+        # Validate timeout range
+        if not (1 <= self.timeout <= 120):
+            raise ValueError(f"Timeout must be between 1 and 120 seconds, got {self.timeout}")
+
     def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for API serialization"""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ServerConfig':
+        """Create from dictionary"""
         return cls(**data)

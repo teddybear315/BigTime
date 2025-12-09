@@ -10,8 +10,11 @@ from .server_tray import main as run_server_tray  # Tray application
 
 __all__ = ["run_server", "run_server_tray", "flask_app", "init_server_db", "run_console_server"]
 
+# Default server port configuration
+DEFAULT_SERVER_PORT: int = 5000
 
-def run_console_server(host='127.0.0.1', port=5000, debug=False):
+
+def run_console_server(host='127.0.0.1', port=DEFAULT_SERVER_PORT, debug=False):
     """Run the server directly in console mode using Waitress"""
     print(f"BigTime Server - Console Mode")
     print(f"Starting server on {host}:{port}")

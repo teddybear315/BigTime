@@ -3,7 +3,6 @@ Remote sync service for BigTime client.
 Handles background synchronization with the server in an offline-first manner.
 """
 
-import json
 import threading
 import time
 import uuid
@@ -71,13 +70,16 @@ class RemoteSyncService(QObject):
         if self.config.api_key:
             self._session.headers['Authorization'] = f'Bearer {self.config.api_key}'
 
-    def _trigger_background_sync(self):
-        """Trigger sync in background thread to avoid blocking UI"""
+    def _trigger_background_sync(self) -> None:
+        """Trigger inbound sync (pull updates) in background thread to avoid blocking UI.
+        
+        Called by timer periodically. Pulls server updates without pushing local changes.
+        """
         def background_sync():
             try:
-                self.sync_now()
+                self._pull_server_updates_only()
             except Exception as e:
-                logger.error(f"Background sync error: {e}")
+                logger.error(f"Background inbound sync error: {e}")
 
         sync_thread = threading.Thread(target=background_sync, daemon=True)
         sync_thread.start()
@@ -104,74 +106,58 @@ class RemoteSyncService(QObject):
             # Collect pending logs using helper
             pending_logs = db_helpers.get_pending_logs()
 
-            # Collect failed logs directly
+            # Collect failed logs using single connection
             failed_logs: List[TimeLog] = []
             conn = db_helpers.get_connection()
             try:
                 cursor = conn.execute(
                     """
-                    SELECT * FROM logs
+                    SELECT id, client_id, remote_id, badge, clock_in, clock_out,
+                           device_id, device_ts, sync_state, created_at, updated_at
+                    FROM logs
                     WHERE sync_state = ?
                     ORDER BY created_at
                     """,
                     (SyncState.FAILED.value,)
                 )
                 for row in cursor.fetchall():
-                    row_dict = dict(row)
-                    failed_logs.append(TimeLog(
-                        id=row_dict['id'],
-                        client_id=row_dict.get('client_id'),
-                        remote_id=row_dict.get('remote_id'),
-                        badge=row_dict['badge'],
-                        clock_in=row_dict['clock_in'],
-                        clock_out=row_dict['clock_out'],
-                        device_id=row_dict.get('device_id'),
-                        device_ts=row_dict.get('device_ts'),
-                        sync_state=row_dict.get('sync_state', SyncState.FAILED.value),
-                        created_at=row_dict.get('created_at'),
-                        updated_at=row_dict.get('updated_at')
-                    ))
+                    failed_logs.append(db_helpers._row_to_timelog(row))
+
+                # Repair missing client_id/device_id in same transaction
+                to_check = pending_logs + failed_logs
+                if to_check:
+                    now = format_datetime(datetime.now())
+                    for log in to_check:
+                        needs_update = False
+                        new_client_id = log.client_id
+                        new_device_id = log.device_id
+
+                        if not new_client_id or not str(new_client_id).strip():
+                            new_client_id = str(uuid.uuid4())
+                            needs_update = True
+
+                        if not new_device_id or not str(new_device_id).strip():
+                            new_device_id = self.config.device_id
+                            needs_update = True
+
+                        if needs_update:
+                            try:
+                                conn.execute(
+                                    """
+                                    UPDATE logs
+                                    SET client_id = ?, device_id = ?, sync_state = ?, updated_at = ?
+                                    WHERE id = ?
+                                    """,
+                                    (new_client_id, new_device_id, SyncState.PENDING.value, now, log.id)
+                                )
+                                repaired += 1
+                            except Exception as e:
+                                logger.warning(f"Failed repairing log {log.id}: {e}")
+
+                    conn.commit()
+
             finally:
                 conn.close()
-
-            to_check = pending_logs + failed_logs
-            if not to_check:
-                return 0
-
-            # Repair missing client_id/device_id; keep badge/clock_in as-is
-            conn2 = db_helpers.get_connection()
-            try:
-                for log in to_check:
-                    needs_update = False
-                    new_client_id = log.client_id
-                    new_device_id = log.device_id
-
-                    if not new_client_id or not str(new_client_id).strip():
-                        new_client_id = str(uuid.uuid4())
-                        needs_update = True
-
-                    if not new_device_id or not str(new_device_id).strip():
-                        new_device_id = self.config.device_id
-                        needs_update = True
-
-                    if needs_update:
-                        try:
-                            now = format_datetime(datetime.now())
-                            conn2.execute(
-                                """
-                                UPDATE logs
-                                SET client_id = ?, device_id = ?, sync_state = ?, updated_at = ?
-                                WHERE id = ?
-                                """,
-                                (new_client_id, new_device_id, SyncState.PENDING.value, now, log.id)
-                            )
-                            repaired += 1
-                        except Exception as e:
-                            logger.warning(f"Failed repairing log {log.id}: {e}")
-
-                conn2.commit()
-            finally:
-                conn2.close()
 
         except Exception as e:
             logger.warning(f"Error while repairing logs: {e}")
@@ -358,8 +344,8 @@ class RemoteSyncService(QObject):
                 # Clear any tracked changes since we've just reconciled everything
                 try:
                     db_helpers.clear_all_changes()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Failed to clear change tracking after sync: {e}")
                 logger.info("Full database synchronization completed successfully")
 
             return success
@@ -373,88 +359,66 @@ class RemoteSyncService(QObject):
             self.is_syncing = False
             try:
                 self._sync_lock.release()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to release sync lock (may not have been acquired): {e}")
 
             # Emit final status update
             status = self.get_sync_status()
             self.sync_status_changed.emit(status.to_dict())
 
-    def sync_now(self):
-        """Perform immediate sync"""
-        logger.info("sync_now called")
+    def sync_now(self) -> bool:
+        """Perform immediate outbound sync (push pending changes) only, no wait for responses.
+        
+        Outbound sync happens immediately on data changes without waiting for inbound updates.
+        This is called when user makes local changes (clock in/out, employee edits, etc).
+        """
+        logger.info("sync_now (outbound) called")
 
         if not self.is_configured():
             logger.warning("sync_now: not configured")
             return False
 
-        # Throttle sync attempts (minimum 5 seconds between attempts) BEFORE acquiring the lock
-        now = datetime.now()
-        if (
-            self.last_sync_attempt
-            and (now - self.last_sync_attempt).total_seconds() < 5
-        ):
-            logger.debug("sync_now: throttled (last attempt too recent)")
-            return False
-
-        # Exponential backoff after failures BEFORE acquiring the lock
-        if self._next_earliest_sync and now < self._next_earliest_sync:
-            wait_ms = int((self._next_earliest_sync - now).total_seconds() * 1000)
-            logger.debug(f"sync_now: backoff active, wait {wait_ms}ms")
-            return False
-
+        # For outbound sync, we only push pending changes, no throttling
         # Prevent concurrent syncs (thread-safe)
         if not self._sync_lock.acquire(blocking=False):
             logger.warning("sync_now: already syncing")
             return False
 
-        # Record attempt time only after we successfully acquire the lock
-        self.last_sync_attempt = now
-
         try:
             self.is_syncing = True
-            logger.info("sync_now: starting sync process")
+            logger.info("sync_now: starting outbound sync (push changes)")
 
             # Emit syncing status update
             status = self.get_sync_status()
             self.sync_status_changed.emit(status.to_dict())
 
-            success = True
-
-            # Process tracked changes efficiently
-            logger.info("sync_now: processing tracked changes")
-            if not self.process_pending_changes():
-                logger.warning("Failed to process some pending changes")
-                success = False
-
-            # Pull updates from server
-            logger.info("sync_now: pulling updates from server")
-            if not self.pull_server_updates():
-                success = False
+            # Process tracked changes immediately (outbound sync)
+            logger.info("sync_now: processing pending changes")
+            success = self.process_pending_changes()
 
             if success:
-                # Clear all tracked changes on successful sync
-                db_helpers.clear_all_changes()
                 self.last_sync = format_datetime(datetime.now())
                 self.last_error = None
-                logger.debug("Sync completed successfully")
+                logger.debug("Outbound sync completed successfully")
                 # Reset backoff on success
                 self._consecutive_failures = 0
                 self._next_earliest_sync = None
+            else:
+                logger.warning("Outbound sync encountered some failures")
 
             return success
 
         except Exception as e:
             self.last_error = str(e)
-            logger.error(f"Sync failed: {e}")
+            logger.error(f"Outbound sync failed: {e}")
             return False
 
         finally:
             self.is_syncing = False
             try:
                 self._sync_lock.release()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to release sync lock: {e}")
 
             # Emit final status update
             status = self.get_sync_status()
@@ -471,6 +435,149 @@ class RemoteSyncService(QObject):
             else:
                 self._consecutive_failures = 0
                 self._next_earliest_sync = None
+
+    def full_sync_now(self) -> bool:
+        """Perform full bidirectional sync (outbound + inbound).
+        
+        Used for initial sync and manual full sync requests. Applies throttling
+        to avoid hammering the server with repeated requests.
+        """
+        logger.info("full_sync_now called")
+
+        if not self.is_configured():
+            logger.warning("full_sync_now: not configured")
+            return False
+
+        # Throttle full sync attempts (minimum 5 seconds between attempts)
+        now = datetime.now()
+        if (
+            self.last_sync_attempt
+            and (now - self.last_sync_attempt).total_seconds() < 5
+        ):
+            logger.debug("full_sync_now: throttled (last attempt too recent)")
+            return False
+
+        # Exponential backoff after failures
+        if self._next_earliest_sync and now < self._next_earliest_sync:
+            wait_ms = int((self._next_earliest_sync - now).total_seconds() * 1000)
+            logger.debug(f"full_sync_now: backoff active, wait {wait_ms}ms")
+            return False
+
+        # Prevent concurrent syncs (thread-safe)
+        if not self._sync_lock.acquire(blocking=False):
+            logger.warning("full_sync_now: already syncing")
+            return False
+
+        # Record attempt time only after we successfully acquire the lock
+        self.last_sync_attempt = now
+
+        try:
+            self.is_syncing = True
+            logger.info("full_sync_now: starting full sync (push + pull)")
+
+            # Emit syncing status update
+            status = self.get_sync_status()
+            self.sync_status_changed.emit(status.to_dict())
+
+            success = True
+
+            # Process tracked changes (outbound)
+            logger.info("full_sync_now: processing pending changes")
+            if not self.process_pending_changes():
+                logger.warning("Failed to process some pending changes")
+                success = False
+
+            # Pull updates from server (inbound)
+            logger.info("full_sync_now: pulling updates from server")
+            if not self.pull_server_updates():
+                success = False
+
+            if success:
+                # Clear all tracked changes on successful sync
+                db_helpers.clear_all_changes()
+                self.last_sync = format_datetime(datetime.now())
+                self.last_error = None
+                logger.debug("Full sync completed successfully")
+                # Reset backoff on success
+                self._consecutive_failures = 0
+                self._next_earliest_sync = None
+
+            return success
+
+        except Exception as e:
+            self.last_error = str(e)
+            logger.error(f"Full sync failed: {e}")
+            return False
+
+        finally:
+            self.is_syncing = False
+            try:
+                self._sync_lock.release()
+            except Exception as e:
+                logger.debug(f"Failed to release sync lock: {e}")
+
+            # Emit final status update
+            status = self.get_sync_status()
+            self.sync_status_changed.emit(status.to_dict())
+
+            # Set/update backoff based on result
+            if self.last_error:
+                self._consecutive_failures = min(self._consecutive_failures + 1, 6)
+                # Backoff schedule: 2,4,8,16,32,64 seconds (capped)
+                delay_seconds = 2 ** self._consecutive_failures
+                delay_seconds = min(delay_seconds, 60)
+                self._next_earliest_sync = datetime.now() + timedelta(seconds=delay_seconds)
+            else:
+                self._consecutive_failures = 0
+                self._next_earliest_sync = None
+
+    def _pull_server_updates_only(self) -> bool:
+        """Pull updates from server (inbound sync only, no outbound push).
+        
+        Called by timer periodically to check for server updates. No throttling,
+        runs on a regular schedule. Does not push local changes.
+        """
+        logger.info("_pull_server_updates_only called")
+
+        if not self.is_configured():
+            return False
+
+        # Prevent concurrent syncs
+        if not self._sync_lock.acquire(blocking=False):
+            logger.debug("_pull_server_updates_only: already syncing, skipping inbound check")
+            return False
+
+        try:
+            self.is_syncing = True
+            logger.debug("_pull_server_updates_only: pulling updates from server")
+
+            # Emit syncing status update
+            status = self.get_sync_status()
+            self.sync_status_changed.emit(status.to_dict())
+
+            # Pull updates from server only (no pushing)
+            success = self.pull_server_updates()
+
+            if success:
+                self.last_sync = format_datetime(datetime.now())
+                logger.debug("Inbound sync completed successfully")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"Inbound sync failed: {e}")
+            return False
+
+        finally:
+            self.is_syncing = False
+            try:
+                self._sync_lock.release()
+            except Exception as e:
+                logger.debug(f"Failed to release sync lock: {e}")
+
+            # Emit final status update
+            status = self.get_sync_status()
+            self.sync_status_changed.emit(status.to_dict())
 
     def process_pending_changes(self) -> bool:
         """Process all pending changes tracked in the database"""
@@ -510,9 +617,9 @@ class RemoteSyncService(QObject):
                         success = False
 
                 elif change_type == 'employee_update':
-                    # Get employee data and push to server
+                    # Get employee data and push to server using PUT (not POST)
                     employee = db_helpers.get_employee_by_badge(entity_id)
-                    if employee and self.sync_employee_to_server(employee):
+                    if employee and self.push_employee_update(employee):
                         db_helpers.clear_change(change_type, entity_id)
                     else:
                         success = False
@@ -524,12 +631,26 @@ class RemoteSyncService(QObject):
                     else:
                         success = False
 
-                elif change_type == 'log_create' or change_type == 'log_update':
-                    # Get log data and push to server
+                elif change_type == 'log_create':
+                    # Create new log on server (POST)
                     log_id = int(entity_id)
                     log = db_helpers.get_log_by_id(log_id)
                     if log and self.sync_log_to_server(log):
                         db_helpers.clear_change(change_type, entity_id)
+                    else:
+                        success = False
+
+                elif change_type == 'log_update':
+                    # Update existing log on server (PUT)
+                    log_id = int(entity_id)
+                    log_obj = db_helpers.get_log_by_id(log_id)
+                    if log_obj:
+                        # Convert dict to TimeLog object for _update_log_on_server
+                        log = TimeLog.from_dict(log_obj)
+                        if self._update_log_on_server(log):
+                            db_helpers.clear_change(change_type, entity_id)
+                        else:
+                            success = False
                     else:
                         success = False
 
@@ -563,6 +684,30 @@ class RemoteSyncService(QObject):
         except Exception as e:
             logger.error(f"Error pulling server updates: {e}")
             return False
+
+    def _fetch_consolidated_sync_data(self) -> Dict[str, Any]:
+        """Fetch all sync-related data in consolidated queries to reduce database round-trips.
+        
+        Returns a dictionary containing:
+        - pending_changes: All pending changes to sync
+        - pending_logs: All pending logs
+        - employees: All employees (for batch operations)
+        
+        This consolidates multiple queries that are commonly used together.
+        """
+        try:
+            return {
+                'pending_changes': db_helpers.get_pending_changes(),
+                'pending_logs': db_helpers.get_pending_logs(),
+                'employees': db_helpers.fetch_all_employees(),
+            }
+        except Exception as e:
+            logger.error(f"Error fetching consolidated sync data: {e}")
+            return {
+                'pending_changes': [],
+                'pending_logs': [],
+                'employees': [],
+            }
 
     def push_pending_logs(self) -> bool:
         """Push all pending log entries to server"""
@@ -807,12 +952,20 @@ class RemoteSyncService(QObject):
                 conn.execute("BEGIN TRANSACTION")
 
                 now = format_datetime(datetime.now())
+
+                # Extract log IDs and build WHERE IN clause for single statement
+                log_ids = [log_id for log_id, _ in failed_logs]
+                placeholders = ','.join('?' * len(log_ids))
+
+                # Single UPDATE statement for all logs
+                conn.execute(f"""
+                    UPDATE logs
+                    SET sync_state = ?, updated_at = ?
+                    WHERE id IN ({placeholders})
+                """, [SyncState.FAILED.value, now] + log_ids)
+
+                # Log individual failure reasons
                 for log_id, error_msg in failed_logs:
-                    conn.execute("""
-                        UPDATE logs
-                        SET sync_state = ?, updated_at = ?
-                        WHERE id = ?
-                    """, (SyncState.FAILED.value, now, log_id))
                     logger.warning(f"Marked log {log_id} as failed: {error_msg}")
 
                 conn.commit()
@@ -875,8 +1028,8 @@ class RemoteSyncService(QObject):
                                 # Store remote_id locally but keep state pending for the close
                                 try:
                                     db_helpers.update_log_remote_id(log.id, remote_id)
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    logger.debug(f"Failed to update remote_id for log {log.id}: {e}")
                             else:
                                 logger.error(f"Create response missing remote id for log {log.id}")
                                 return False
@@ -899,8 +1052,8 @@ class RemoteSyncService(QObject):
                                         if remote_id:
                                             try:
                                                 db_helpers.update_log_remote_id(log.id, remote_id)
-                                            except Exception:
-                                                pass
+                                            except Exception as e:
+                                                logger.debug(f"Failed to update remote_id for log {log.id}: {e}")
                                         break
                         if not remote_id:
                             logger.error(f"Could not resolve remote id after 409 for log {log.id}")

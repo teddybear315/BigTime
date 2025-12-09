@@ -33,16 +33,48 @@ def get_resource_path(relative_path: str) -> Path:
 
 def get_data_path(relative_path: str) -> Path:
     """Get absolute path to writable data files (databases, logs, backups, reports)
+    Returns a stable, writable location for runtime data.
 
-    Always uses the directory containing the executable (or project root in dev),
-    NOT the temporary extraction folder, so data persists between runs.
+    Behavior:
+    - In development (not frozen) this returns a path under the project root
+      (keeps existing dev behavior).
+    - For frozen/packaged applications (PyInstaller), prefer a per-user data
+      directory so updates to the app bundle do not overwrite the database.
+
+    On macOS this will resolve to: ``~/Library/Application Support/<AppName>/...``
+    (or the path returned by ``platformdirs.user_data_dir`` when available).
     """
-    if getattr(sys, 'frozen', False):
-        # Running in PyInstaller bundle - always use executable directory
+    # Development: keep existing behavior for convenience
+    if not getattr(sys, 'frozen', False):
+        return Path(__file__).parent.parent / relative_path
+
+    # Packaged app: prefer a per-user data dir (does not live inside the .app bundle)
+    try:
+        # platformdirs provides cross-platform user data locations
+        from platformdirs import user_data_dir
+
+        base_path = Path(user_data_dir("BigTime"))
+    except Exception:
+        # Fallbacks if platformdirs is not available
+        if sys.platform == 'darwin':
+            base_path = Path.home() / 'Library' / 'Application Support' / 'BigTime'
+        elif sys.platform == 'win32':
+            # Use %APPDATA% (Roaming) if set
+            appdata = os.getenv('APPDATA')
+            if appdata:
+                base_path = Path(appdata) / 'BigTime'
+            else:
+                base_path = Path.home() / 'AppData' / 'Roaming' / 'BigTime'
+        else:
+            # Linux and other Unix-like systems
+            base_path = Path.home() / '.local' / 'share' / 'BigTime'
+
+    # Ensure the directory exists
+    try:
+        base_path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # Last-ditch fallback to executable dir if we cannot create user dir
         base_path = Path(sys.executable).parent
-    else:
-        # Running in development - go up from shared/ to project root
-        base_path = Path(__file__).parent.parent
 
     return base_path / relative_path
 

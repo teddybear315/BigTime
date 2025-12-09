@@ -8,11 +8,7 @@ ntplib
 reportlab
 Pillow  # Required by reportlab for image handling
 
-# Server Framework
-flask
-flask-cors
-
-# Production WSGI Server (replaces Flask dev server)
+# Production WSGI Server
 waitress
 
 # HTTP Client (Sync Service)
@@ -24,6 +20,8 @@ tzdata
 # Colored Console Output (optional, has fallback)
 termcolor
 
+
+platformdirs
 # Windows Autostart Setup (Windows only - optional)
 # Required only for setup_autostart.py script on Windows
 # Install with: pip install pywin32 winshell
