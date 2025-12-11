@@ -516,5 +516,5 @@ For setup assistance:
 
 ---
 
-**Last Updated**: October 14, 2025
-**Version**: 2.0
+**Last Updated**: December 11, 2025
+**Version**: 2.1.1

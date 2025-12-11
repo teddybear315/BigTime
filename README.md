@@ -2,20 +2,22 @@
 
 ## This program was written 100% by AI because I Dont Have Time™
 
-A basic time tracking and payroll management system with client-server architecture, built with Python and PyQt6.
+A robust time tracking and payroll management system with client-server architecture and offline-first synchronization, built with Python and PyQt6.
 
 ---
 
 ## 📋 Overview
 
-BigTime is a professional time clock application designed for small to medium businesses. It features:
+BigTime is a professional, production-ready time clock application designed for small to medium businesses. It features:
 
-- **Client Application**: Employee time tracking with badge-based clock in/out
-- **Server Application**: Centralized data management with REST API
-- **Sync Service**: Automatic synchronization between clients and server
-- **Time Synchronization**: NTP-based accurate timekeeping
-- **Payroll Reports**: PDF generation for paystubs and timesheets
-- **Multi-Client Support**: Multiple clients can connect to one server
+- **Client Application**: Employee time tracking with badge-based clock in/out and offline support
+- **Server Application**: Centralized data management with REST API and Waitress WSGI server
+- **Offline-First Sync Service**: Automatic background synchronization with conflict resolution
+- **Time Synchronization**: NTP-based accurate timekeeping with timezone support
+- **Payroll Reports**: PDF generation for paystubs and time summaries
+- **Multi-Client Support**: Multiple clients can connect to one server simultaneously
+- **System Tray Integration**: Server runs as system tray application (with console fallback)
+- **Database Backup & Recovery**: SQLite with WAL mode for reliability
 
 ---
 
@@ -85,10 +87,10 @@ Feel free to make a pull request to merge other platform's executables in a form
 
 ```text
 dist/
-└── <OS>/                  # OS Executable Package
-    ├── BigTime-Client     # Client Executable
-    ├── BigTime-Server     # Server Executable
-    └── BigTime - Shortcut # Client Shortcut for Desktop
+└── <OS>/                         # OS Executable Package
+    ├── BigTime.                  # Client Executable
+    ├── BigTime-Server            # Server Executable
+    └── BigTime-Server - Shortcut # Client Shortcut for Desktop (Windows only)
 ```
 
 ### Server Autostart
@@ -143,67 +145,58 @@ See `docs/AUTOSTART.md` for detailed documentation.
 
 ## 🏗️ Architecture
 
-### Client-Server Model
+### Component Breakdown
 
-```text
-┌─────────────────┐         ┌─────────────────┐
-│  Client App     │         │  Server App     │
-│  (PyQt6 GUI)    │ ◄─────► │  (REST API)     │
-│                 │  HTTP   │  (Waitress)     │
-│  - Time Clock   │         │  - Database     │
-│  - Sync Service │         │  - Time Sync    │
-│  - Reports      │         │  - API Routes   │
-└─────────────────┘         └─────────────────┘
+**Client Application** (`client/`):
+- `gui_app.py`: Main PyQt6 GUI window with async initialization
+- `timeclock_client.py`: High-level client abstraction layer
+- `sync_service.py`: Background sync service with offline-first logic
+- `background_worker.py`: Network operations in separate thread
+- `dialog_managers.py`: Complex dialog management
+
+**Server Application** (`server/`):
+- `server.py`: Flask REST API with all endpoints
+- `server_tray.py`: System tray application and settings GUI
+- `timeserver_service.py`: NTP time synchronization
+
+**Shared Components** (`shared/`):
+- `db_helpers.py`: Database abstraction for local operations
+- `models.py`: Shared data models (Employee, TimeLog, SyncState)
+- `utils.py`: Common utilities and helpers
+- `logging_config.py`: Standardized logging setup
+
+**UI Components** (`ui/`):
+- `dialogs.py`: Reusable dialog windows
+- `pdf_utils.py`: PDF generation utilities
+- `fonts.py`: Font definitions for consistent styling
+
+### Data Models & Sync States
+
 ```
+TimeLog {
+  id: int (local)
+  client_id: UUID (for idempotency)
+  remote_id: int (server-assigned)
+  badge: str
+  clock_in: ISO datetime
+  clock_out: ISO datetime
+  sync_state: PENDING | SYNCED | FAILED
+}
 
-### Components
+Employee {
+  id: int
+  name: str
+  badge: str (unique)
+  pin: str
+  department: str
+  rate: float
+  period: hourly | monthly
+  [+ contact & hire info]
+}
 
-- **Client**: PyQt6 GUI application for employees to clock in/out
-- **Server**: Flask REST API served by Waitress WSGI server
-- **Shared**: Common utilities, models, and database helpers
-- **UI**: Reusable dialog components and PDF generation
-- **Sync Service**: Background service for client-server synchronization
-
----
-
-## 📁 Project Structure
-
-```text
-BigTime/
-├── client/                 # Client application
-│   ├── gui_app.py         # Main GUI application
-│   ├── sync_service.py    # Sync service
-│   ├── background_worker.py
-│   ├── dialog_managers.py
-│   └── timeclock_client.py
-│
-├── server/                 # Server application
-│   ├── server.py          # REST API routes
-│   ├── server_tray.py     # System tray application
-│   └── timeserver_service.py  # NTP time sync
-│
-├── shared/                 # Shared utilities
-│   ├── db_helpers.py      # Database operations
-│   ├── models.py          # Data models
-│   ├── utils.py           # Common utilities
-│   └── logging_config.py  # Logging setup
-│
-├── ui/                     # UI components
-│   ├── dialogs.py         # Dialog windows
-│   ├── fonts.py           # Font definitions
-│   └── pdf_utils.py       # PDF generation
-│
-├── docs/                   # Documentation
-│   ├── API.md             # Server API documentation
-│   ├── SETUP.md           # Setup guide
-│   └── TROUBLESHOOTING.md # Common issues
-│
-├── client_main.py         # Client entry point
-├── launcher.py            # Development launcher
-├── requirements.txt       # Python dependencies
-├── BigTime-Client.spec    # Client build spec
-├── BigTime-Server.spec    # Server build spec
-└── README.md              # This file
+SyncState: PENDING → SYNCED | FAILED
+           FAILED → PENDING (retry)
+           SYNCED → PENDING (data changed)
 ```
 
 ---
@@ -229,6 +222,18 @@ Managed in database (`server_bigtime.db`):
 
 ---
 
+## 🌐 Firewall Rules
+
+```bash
+# Allow server port (Windows)
+netsh advfirewall firewall add rule name="BigTime Server" dir=in action=allow protocol=TCP localport=5000
+
+# Allow server port (Linux)
+sudo ufw allow 5000/tcp
+```
+
+---
+
 ## 📚 Documentation
 
 Detailed documentation available in `docs/` folder:
@@ -236,8 +241,6 @@ Detailed documentation available in `docs/` folder:
 - **[API Documentation](docs/API.md)** - Complete REST API reference
 - **[Setup Guide](docs/SETUP.md)** - Detailed installation and configuration
 - **[Troubleshooting](docs/TROUBLESHOOTING.md)** - Common issues and solutions
-- **[Testing Guide](TESTING_GUIDE.md)** - Testing procedures
-- **[Codebase Analysis](CODEBASE_ANALYSIS.md)** - Code quality analysis
 
 ---
 
@@ -245,18 +248,30 @@ Detailed documentation available in `docs/` folder:
 
 ### Core Technologies
 
-- **Python 3.9+**: Core language
-- **PyQt6**: GUI framework
-- **Flask**: Web framework (server API)
-- **Waitress**: Production WSGI server
-- **SQLite**: Database (with WAL mode)
+- **Python 3.9+**: Core programming language
+- **PyQt6**: Cross-platform GUI framework for client
+- **Flask**: Lightweight web framework for REST API
+- **Waitress**: Production-grade WSGI server (no external processes)
+- **SQLite**: Lightweight database with WAL mode for reliability
+- **requests**: HTTP client library for sync operations
 
-### Key Libraries
+### Additional Libraries
 
-- **requests**: HTTP client for sync
-- **reportlab**: PDF generation
-- **ntplib**: NTP time synchronization (optional)
-- **zoneinfo/tzdata**: Timezone handling
+- **reportlab + Pillow**: PDF generation for paystubs and reports
+- **ntplib**: NTP client for time synchronization (optional, has fallback)
+- **flask-cors**: CORS support for multi-client connections
+- **zoneinfo + tzdata**: Timezone handling (Windows compatibility)
+- **termcolor**: Colored console output (optional, has fallback)
+- **platformdirs**: Cross-platform data directory handling
+
+### Key Design Patterns
+
+- **Offline-First**: Client operates independently, syncs when available
+- **Thread-Based Async**: Background tasks in separate threads (no async/await)
+- **Idempotent Requests**: Client-generated UUIDs prevent duplicate entries
+- **Exponential Backoff**: Smart retry logic with progressive delays
+- **Server-Wins Conflict Resolution**: Server state is authoritative
+- **Graceful Degradation**: Features work with limited fallbacks
 
 ---
 
@@ -270,109 +285,119 @@ Detailed documentation available in `docs/` folder:
 
 ---
 
-## 🌐 Network Requirements
-
-### Client
-
-- Outbound HTTP to server (default port 5000)
-- Internet access for NTP time sync (optional)
-
-### Server
-
-- Inbound HTTP on port 5000 (configurable)
-- Internet access for NTP time sync (optional)
-
-### Firewall Rules
-
-```bash
-# Allow server port (Windows)
-netsh advfirewall firewall add rule name="BigTime Server" dir=in action=allow protocol=TCP localport=5000
-
-# Allow server port (Linux)
-sudo ufw allow 5000/tcp
-```
-
----
-
-## 📊 Features
+## 📊 Core Features
 
 ### Employee Management
 
-- ✅ Add, edit, delete employees
-- ✅ Badge-based identification
-- ✅ Department organization
-- ✅ Deactivation (soft delete)
-- ✅ PIN protection
+- ✅ Add, edit, delete, and deactivate employees
+- ✅ Badge Number-based identification (unique, searchable)
+- ✅ Department and hire date tracking
+- ✅ Employee rate and pay period configuration (hourly/monthly)
+- ✅ PIN-based access control for secure operations
+- ✅ Phone number, SSN, and date of birth fields
+- ✅ Multi-device employee synchronization
 
 ### Time Tracking
 
-- ✅ Clock in/out with badge scan
-- ✅ Automatic time synchronization
-- ✅ Time log editing
-- ✅ Audit trail
+- ✅ **Number-based Clock In/Out**: Input badge number to record time
+- ✅ **Offline Operation**: Works without server connection
+- ✅ **Automatic Time Sync**: NTP-based accurate timekeeping
+- ✅ **Time Log Editing**: Managers can edit/correct clock entries
+- ✅ **Client-side UUID Tracking**: Ensures idempotent sync operations
+- ✅ **Audit Trail**: Created/updated timestamps on all records
+- ✅ **Sync State Tracking**: PENDING/SYNCED/FAILED states for all records
 
-### Payroll
+### Payroll & Reporting
 
-- ✅ Hourly/salary pay periods
-- ✅ Overtime calculation
-- ✅ PDF paystub generation
-- ✅ Date range reports
-- ✅ Employee time summaries
+- ✅ Hourly and monthly pay period support
+- ✅ Employee rate configuration and storage
+- ✅ PDF paystub and timesheet generation
+- ✅ Date range based time summaries
+- ✅ Employee work history and time analysis
+- ✅ ReportLab-based PDF export
 
-### Synchronization
+### Background Synchronization (Offline-First)
 
-- ✅ Automatic background sync
-- ✅ Conflict resolution
-- ✅ Offline operation support
-- ✅ Manual sync trigger
-- ✅ Sync status indicators
+- ✅ **Automatic Background Sync**: Runs every 30 seconds by default
+- ✅ **Conflict Resolution**: Server-wins strategy with local change tracking
+- ✅ **Offline Support**: Buffers changes locally during disconnection
+- ✅ **Exponential Backoff**: Prevents excessive retries on failure
+- ✅ **Manual Sync Trigger**: Force immediate synchronization
+- ✅ **Sync Status Indicators**: Real-time connection status display
+- ✅ **Persistent Queue**: Changes persist across app restarts
+- ✅ **Separate Sync States**: Track employee changes vs time log changes
+
+### Server Management
+
+- ✅ REST API with Flask and Waitress WSGI server
+- ✅ API Key management for device authentication
+- ✅ Server configuration via GUI settings dialog
+- ✅ Timezone support with automatic daylight saving handling
+- ✅ NTP time synchronization with regional server selection
+- ✅ CORS enabled for multi-client support
+- ✅ SQLite database with WAL mode for concurrent access
+- ✅ 5-second database busy timeout for reliability
 
 ### Administration
 
-- ✅ API key management
-- ✅ Server configuration
-- ✅ Database backups
-- ✅ System tray integration
-- ✅ Multi-platform support
+- ✅ Manager PIN setup on first run
+- ✅ Out-of-the-box (OOTB) initial configuration
+- ✅ Server Settings GUI with multiple tabs
+- ✅ API key generation and device tracking
+- ✅ Timezone and NTP configuration
+- ✅ System tray integration (with console fallback)
+- ✅ Multi-platform support (Windows, macOS, Linux)
+
+### Data Management
+
+- ✅ Automatic database initialization on first run
+- ✅ Data persistence across app restarts
+- ✅ Backup/restore capabilities
+- ✅ Employee data migration on badge changes
+- ✅ Comprehensive error handling and recovery
 
 ---
 
-## 🖥️ System Requirements
+## 📈 Version History
 
-### Minimum
+### Version 2.1 (Current - December 11, 2025)
 
-- **OS**: Windows 10, macOS 10.14, Linux (Ubuntu 20.04+)
-- **RAM**: 2 GB
-- **Disk**: 100 MB free space (distributed executables only)
-- **Python**: 3.9+ (for source)
+**Major Improvements**:
+- ✅ **Enhanced Offline-First Sync**: Robust background sync service with exponential backoff
+- ✅ **Better Error Handling**: Comprehensive error recovery and status reporting
+- ✅ **Enhanced GUI**: Async initialization, better dialogs, improved UX
+- ✅ **Connection Status Monitoring**: Real-time sync status indicators
+- ✅ **Conflict Resolution**: Server-authoritative strategy with client change tracking
 
-### Recommended
+### Version 2.0 (Current - December 2025)
 
-- **OS**: Windows 11, macOS 12+, Linux (Ubuntu 22.04+)
-- **RAM**: 4 GB
-- **Disk**: 1 GB free space
-- **Network**: 100 Mbps
+- ✅ **New Waitress WSGI Server**: Replaced simple Flask dev server with production-ready Waitress
+- ✅ **Improved OOTB Setup**: Out-of-the-box experience with manager PIN setup
+- ✅ **Enhanced error handling**: Basic error recovery and status reporting
+- ✅ **Enhanced GUI**: Async initialization, better dialogs, improved UX
+- ✅ **API Key Management**: Secure device authentication and key generation
+- ✅ **Timezone Support**: Automatic timezone handling with NTP adjustment
+- ✅ **WAL Mode Database**: SQLite with Write-Ahead Logging for reliability
+- ✅ **System Tray Integration**: Server runs as system tray app (with console fallback)
+- ✅ **Multi-Platform Build**: Specs for Windows, macOS, Linux
 
----
+### Version 1.0 (Previous)
 
-## 🤝 Contributing
-
-This is a private business application. For internal development:
-
-1. Follow existing code style
-2. Update documentation for changes
-3. Test thoroughly before committing
-4. Use meaningful commit messages
-
----
-
-## 📄 License
-
-Proprietary - SCR LLC © 2025
+- Initial client-server architecture
+- Basic Flask API
+- Local SQLite database
+- Basic time tracking functionality
+- Employee management
+- Simple payroll reports
 
 ---
 
 ## 🆘 Support
+
+### 📞 Contact
+
+**Suicide Clique Records LLC**
+teddy@screcords.org
 
 ### Documentation
 
@@ -391,27 +416,6 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
 
 ---
 
-## 📈 Version History
-
-### Version 2.0 (BigTime)
-
-- ✅ New server built with Waitress
-- ✅ Enhanced OOTB setup flow
-- ✅ Enhanced error handling
-- ✅ Enhanced GUI
-- ✅ Cleaned up imports and dependencies
-- ✅ Connect over HTTP
-
-### Version 1.0 (SmallTime)
-
-- Initial client-server architecture
-- Basic time tracking functionality
-- Employee management
-- Payroll reports
-- Single machine
-
----
-
 ## 🚧 Roadmap
 
 Please do not expect updates, while I might dabble in software dev every now and again, I'm no longer a programmer, just a Claude script kiddie. Crazy fall off ik.
@@ -419,7 +423,6 @@ Please do not expect updates, while I might dabble in software dev every now and
 ### Possible Features
 
 - [ ] Web-based admin dashboard
-- [ ] Mobile app support
 - [ ] Advanced reporting analytics
 - [ ] Integration with accounting software
 - [ ] Role-based access control
@@ -428,17 +431,14 @@ Please do not expect updates, while I might dabble in software dev every now and
 
 ---
 
-## 📞 Contact
+## 📄 License
 
-**Suicide Clique Records LLC**
-teddy@screcords.org
-
----
+Proprietary - SCR LLC © 2025
 
 Intended For Internal Use Only
 
 ---
 
-**Last Updated**: October 14, 2025
-**Version**: 2.0
+**Last Updated**: December 11, 2025
+**Version**: 2.1.1
 **Status**: Production Ready

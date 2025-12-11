@@ -632,7 +632,7 @@ logs/
 
 When reporting issues, include:
 
-- **Version**: BigTime 2.0
+- **Version**: BigTime 2.1.1
 - **OS**: Windows 11, macOS 12, etc.
 - **Error message**: Exact text from error dialog or log
 - **Steps to reproduce**: What you did before error
@@ -654,10 +654,10 @@ copy logs\server_*.log support_logs\
 
 Use this checklist to diagnose issues:
 
-- [ ] Application version is 2.0
+- [ ] Application version is 2.1.1
 - [ ] All dependencies installed (`pip list`)
 - [ ] Server is running and accessible
-- [ ] Firewall allows port 5000
+- [ ] Firewall allows server port
 - [ ] Database files exist and not corrupted
 - [ ] API key is valid and correctly entered
 - [ ] Network connectivity between client/server
@@ -668,5 +668,5 @@ Use this checklist to diagnose issues:
 
 ---
 
-**Last Updated**: October 14, 2025
-**Version**: 2.0
+**Last Updated**: December 11, 2025
+**Version**: 2.1.1

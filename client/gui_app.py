@@ -19,6 +19,7 @@ from client.background_worker import NetworkWorker
 from client.dialog_managers import (EmployeeListManager, ReportManager,
                                     TimeLogsManager)
 from client.timeclock_client import get_client
+import shared
 from shared.logging_config import get_client_logger
 from shared.models import Employee
 from shared.utils import get_data_path, get_resource_path
@@ -1160,7 +1161,7 @@ def main():
 
     # Set application metadata
     app.setApplicationName("BigTime Client")
-    app.setApplicationVersion("2.0")
+    app.setApplicationVersion(shared.__VERSION__)
     app.setOrganizationName("SCR LLC")
 
     # Create and show main window

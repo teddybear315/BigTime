@@ -14,6 +14,7 @@ from flask import Flask, g, jsonify, request
 from flask_cors import CORS
 
 from server.timeserver_service import get_time_service, initialize_time_service
+import shared
 from shared.logging_config import get_server_logger
 from shared.models import (ApiResponse, CreateLogRequest, Employee, PayPeriod,
                            SyncState, TimeLog, UpdateLogRequest)
@@ -374,7 +375,9 @@ def get_server_info():
     return jsonify(ApiResponse(True, data={
         "company_name": company_name,
         "server_time": format_datetime(time_service.get_current_time()),
-        "version": "2.0"
+        "version": shared.__VERSION__,
+        "api_version": shared.__API_VERSION__,
+        "timezone": time_service.timezone_name,
     }).to_dict())
 
 
@@ -385,10 +388,7 @@ def get_server_time():
     time_service = get_time_service()
     current_time = time_service.get_current_time()
 
-    return jsonify(ApiResponse(True, data={
-        "server_time": format_datetime(current_time),
-        "sync_status": time_service.get_sync_status()
-    }).to_dict())
+    return jsonify(ApiResponse(True, data=time_service.get_sync_status()))
 
 
 @app.route('/api/v1/time/sync', methods=['POST'])
@@ -924,12 +924,38 @@ def run_server(host='0.0.0.0', port=DEFAULT_SERVER_PORT):
     with _waitress_lock:
         _waitress_server = server
 
-    try:
-        # This blocks until server stops
-        server.run()
-    finally:
-        with _waitress_lock:
-            _waitress_server = None
+        try:
+            # This blocks until server stops
+            server.run()
+        except Exception as e:
+            logger.error(f"Server error during run: {e}")
+            raise
+        finally:
+            # Ensure proper cleanup on exit
+            with _waitress_lock:
+                try:
+                    with _waitress_lock:
+                        # Close all active channels/connections before closing server
+                        if hasattr(server, 'asyncore') and hasattr(server.asyncore, 'socket_map'):
+                            try:
+                                for dispatcher in list(server.asyncore.socket_map.values()):
+                                    try:
+                                        dispatcher.close()
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+
+                        # Close trigger sockets if they exist
+                        if hasattr(server, 'trigger') and server.trigger:
+                            try:
+                                server.trigger.close()
+                            except Exception:
+                                pass
+
+                        _waitress_server = None
+                except Exception as e:
+                    logger.error(f"Error during server cleanup: {e}")
 
 
 @app.route('/admin/shutdown', methods=['POST'])
@@ -945,9 +971,22 @@ def admin_shutdown():
         if _waitress_server is None:
             return jsonify(ApiResponse(False, error="Server not running").to_dict()), 400
 
-        # Use close() to stop the server loop
+        # Use close() to stop the server loop with proper connection cleanup
         try:
             with _waitress_lock:
+                # Close all active channels/connections first to prevent socket errors
+                if hasattr(_waitress_server, 'asyncore') and hasattr(_waitress_server.asyncore, 'socket_map'):
+                    try:
+                        # Close all asyncore sockets gracefully
+                        for dispatcher in list(_waitress_server.asyncore.socket_map.values()):
+                            try:
+                                dispatcher.close()
+                            except Exception:
+                                pass  # Ignore errors during dispatcher close
+                    except Exception:
+                        pass  # If socket_map doesn't exist, continue with normal close
+
+                # Now close the server
                 _waitress_server.close()
         except Exception as e:
             logger.error(f"Error shutting down server: {e}")

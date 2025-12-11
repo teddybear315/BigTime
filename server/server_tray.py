@@ -14,6 +14,7 @@ from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import (QApplication, QDialog, QMenu, QMessageBox,
                              QSystemTrayIcon)
 
+import shared
 from shared.logging_config import get_server_logger
 
 # Setup standardized logging
@@ -91,6 +92,9 @@ class ServerManager(QThread):
             url = f'http://{self._host}:{self._port}/admin/shutdown'
             try:
                 requests.post(url, timeout=3)
+            except requests.exceptions.ConnectionError:
+                # Server already closed, that's fine
+                logger.debug("Connection refused during shutdown (server may already be stopping)")
             except Exception as e:
                 logger.warning(f"Shutdown request failed: {e}")
         except ImportError:
@@ -100,7 +104,7 @@ class ServerManager(QThread):
             # Shutdown request failed; continue to fallback
             logger.debug(f"Graceful shutdown failed: {e}")
 
-        # Wait briefly for the server thread to exit
+        # Wait briefly for the server thread to exit gracefully
         try:
             self.wait(3000)
         except Exception as e:
@@ -146,8 +150,11 @@ class ServerManager(QThread):
 class BigTimeServerTray(QObject):
     """System tray application for BigTime Server"""
 
-    def __init__(self):
+    def __init__(self, app:QApplication):
+
         super().__init__()
+
+        self.app = app
 
         # Create system tray
         self.tray_icon = QSystemTrayIcon()
@@ -390,15 +397,15 @@ class BigTimeServerTray(QObject):
 
     def on_server_started(self):
         """Handle server started event"""
-        self.status_action.setText(f"Status: Running on {self.host}:{self.port}")
+        self.status_action.setText(f"Status: Running v{shared.__VERSION__} on {self.host}:{self.port}")
         self.start_action.setEnabled(False)
         self.stop_action.setEnabled(True)
-        self.tray_icon.setToolTip(f"BigTime Server - Running on {self.host}:{self.port}")
+        self.tray_icon.setToolTip(f"BigTime Server v{shared.__VERSION__} - Running on {self.host}:{self.port}")
 
         # Show notification
         if QSystemTrayIcon.supportsMessages():
             self.tray_icon.showMessage(
-                "BigTime Server",
+                f"BigTime Server v{shared.__VERSION__}",
                 f"Server started on {self.host}:{self.port}",
                 QSystemTrayIcon.MessageIcon.Information,
                 3000
@@ -406,17 +413,17 @@ class BigTimeServerTray(QObject):
 
     def on_server_stopped(self):
         """Handle server stopped event"""
-        self.status_action.setText("Status: Stopped")
+        self.status_action.setText(f"Status: v{shared.__VERSION__} Stopped")
         self.start_action.setEnabled(True)
         self.stop_action.setEnabled(False)
-        self.tray_icon.setToolTip("BigTime Server - Stopped")
+        self.tray_icon.setToolTip(f"BigTime Server v{shared.__VERSION__} - Stopped")
 
     def on_server_error(self, error):
         """Handle server error event"""
-        self.status_action.setText("Status: Error")
+        self.status_action.setText(f"Status: v{shared.__VERSION__} Error")
         self.start_action.setEnabled(True)
         self.stop_action.setEnabled(False)
-        self.tray_icon.setToolTip(f"BigTime Server - Error: {error}")
+        self.tray_icon.setToolTip(f"BigTime Server v{shared.__VERSION__} - Error: {error}")
 
         QMessageBox.critical(None, "Server Error", f"Server error: {error}")
 
@@ -435,12 +442,13 @@ class BigTimeServerTray(QObject):
                 return
 
         self.server_manager.stop_server()
-        QCoreApplication.quit()
+        self.app.quit()
+
 
 
 def run_console_server():
     """Fallback console server when system tray is not available"""
-    logger.info("BigTime Server - Console Mode")
+    logger.info(f"BigTime Server v{shared.__VERSION__} - Console Mode")
     logger.info("System tray not available, running in console mode.")
     logger.info("Press Ctrl+C to stop the server.")
 
@@ -489,7 +497,7 @@ def main():
             logger.warning("- Desktop environment doesn't support system tray")
             logger.warning("- Running in headless mode")
         elif current_platform == "Darwin":
-            logger.warning("System tray not available on macOS.")
+            logger.warning("System tray not available on current version of macOS.")
         else:
             logger.warning("System tray not available on this system.")
 
@@ -499,13 +507,13 @@ def main():
         return
 
     # System tray is available, run GUI mode
-    logger.info(f"Starting BigTime Server on {platform.system()}")
+    logger.info(f"Starting BigTime Server v{shared.__VERSION__} on {platform.system()}")
 
     # Prevent quit on last window closed (we want to stay in tray)
     app.setQuitOnLastWindowClosed(False)
 
     # Create and show tray application
-    tray_app = BigTimeServerTray()
+    tray_app = BigTimeServerTray(app)
 
     logger.info("Server running in system tray. Right-click tray icon for options.")
 

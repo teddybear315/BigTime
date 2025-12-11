@@ -3,6 +3,8 @@
 .github/*
 build/*
 __pycache__/*
+logs/*
+backups/*
 *.db
 *.pyc
 ._*

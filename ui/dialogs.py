@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QDateTimeEdit,
                              QSpinBox, QTableWidget, QTableWidgetItem,
                              QTextEdit, QVBoxLayout, QMessageBox)
 
+import shared
 from shared.models import Employee
 from shared.utils import create_app_icon
 from ui.fonts import fonts
@@ -662,7 +663,6 @@ class EditEmployeeDialog(AddEmployeeDialog):
 
         # Validate PIN format - allow empty (keeps current PIN), but if provided must be 4 digits
         if pin and (len(pin) != 4 or not pin.isdigit()):
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Invalid PIN", "Employee PIN must be exactly 4 digits. Leave empty to keep current PIN.")
             return
 
@@ -817,18 +817,22 @@ class SettingsDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
+        header_group = QVBoxLayout()
+
         # Header
         title = QLabel('Settings')
         title.setFont(fonts["header"])
 
-        layout.addWidget(title)
+        header_group.addWidget(title)
 
         # Info message about server-managed settings
         info_label = QLabel('Note: Company name and time settings are managed by the server.')
         info_label.setWordWrap(True)
         info_label.setFont(fonts["small"])
         info_label.setStyleSheet('color: #666; font-style: italic;')
-        layout.addWidget(info_label)
+        header_group.addWidget(info_label)
+
+        layout.addLayout(header_group)
 
         # Security Settings Group
         security_group = QGroupBox("Security Settings")
@@ -859,12 +863,21 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(file_group)
 
+        bottom_row = QHBoxLayout()
+
+        self.version_label = QLabel(f'BigTime Client v{shared.__VERSION__} API: v{shared.__API_VERSION__}')
+        self.version_label.setFont(fonts['monospace_small'])
+        self.version_label.setStyleSheet('color: #666;')
+        bottom_row.addWidget(self.version_label, 0, Qt.AlignmentFlag.AlignRight)
+
+        bottom_row.addStretch()
         # Buttons
         self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
-        layout.addWidget(self.button_box)
+        bottom_row.addWidget(self.button_box, 0, Qt.AlignmentFlag.AlignLeft)
 
+        layout.addLayout(bottom_row)
     def browse(self):
         dir_path = QFileDialog.getExistingDirectory(self, 'Select Directory', self.path_edit.text())
         if dir_path:
@@ -876,7 +889,6 @@ class SettingsDialog(QDialog):
 
         # Validate PIN format - allow empty for no change, but if provided must be 4 digits
         if pin and (len(pin) != 4 or not pin.isdigit()):
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Invalid PIN", "Manager PIN must be exactly 4 digits.")
             return
 
@@ -1158,13 +1170,11 @@ class OOTBClientDialog(QDialog):
 
         # Validate PIN format
         if not pin or len(pin) != 4 or not pin.isdigit():
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Invalid PIN", "Manager PIN must be exactly 4 digits.")
             return
 
         # Validate PIN confirmation
         if pin != confirm_pin:
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "PIN Mismatch", "Manager PIN and confirmation do not match.")
             return
 
@@ -1360,6 +1370,11 @@ class ServerConfigDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
+        self.version_label = QLabel(f'BigTime Client v{shared.__VERSION__} API: v{shared.__API_VERSION__}')
+        self.version_label.setFont(fonts['monospace_small'])
+        self.version_label.setStyleSheet('color: #666;')
+        layout.addWidget(self.version_label, 0, Qt.AlignmentFlag.AlignCenter)
+
         # Server settings group
         server_group = QGroupBox("Server Settings")
         server_layout = QFormLayout(server_group)
@@ -1545,7 +1560,6 @@ class ServerConfigDialog(QDialog):
                 self.api_table.item(i, 0).setData(Qt.ItemDataRole.UserRole, api_key)
 
         except Exception as e:
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, 'Error', f'Failed to load API keys: {e}')
 
     def generate_api_key(self):
@@ -1553,7 +1567,7 @@ class ServerConfigDialog(QDialog):
         try:
             import uuid
 
-            from PyQt6.QtWidgets import QInputDialog, QMessageBox
+            from PyQt6.QtWidgets import QInputDialog
 
             from server.server import get_standalone_db
 
@@ -1592,7 +1606,6 @@ class ServerConfigDialog(QDialog):
             self.load_api_keys()
 
         except Exception as e:
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, 'Error', f'Failed to generate API key: {e}')
 
     def revoke_api_key(self):
@@ -1600,7 +1613,6 @@ class ServerConfigDialog(QDialog):
         try:
             current_row = self.api_table.currentRow()
             if current_row < 0:
-                from PyQt6.QtWidgets import QMessageBox
                 QMessageBox.information(self, 'No Selection', 'Please select an API key to revoke.')
                 return
 
@@ -1609,7 +1621,6 @@ class ServerConfigDialog(QDialog):
             api_key = api_key_item.data(Qt.ItemDataRole.UserRole)
 
             # Confirm revocation
-            from PyQt6.QtWidgets import QMessageBox
             reply = QMessageBox.question(
                 self, 'Confirm Revocation',
                 f'Are you sure you want to revoke this API key?\n\n'
@@ -1639,7 +1650,6 @@ class ServerConfigDialog(QDialog):
             self.load_api_keys()
 
         except Exception as e:
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, 'Error', f'Failed to revoke API key: {e}')
 
     def copy_api_key(self):
@@ -1647,7 +1657,6 @@ class ServerConfigDialog(QDialog):
         try:
             current_row = self.api_table.currentRow()
             if current_row < 0:
-                from PyQt6.QtWidgets import QMessageBox
                 QMessageBox.information(self, 'No Selection', 'Please select an API key to copy.')
                 return
 
@@ -1663,7 +1672,6 @@ class ServerConfigDialog(QDialog):
 
             # Check if the key is active
             if "Revoked" in status:
-                from PyQt6.QtWidgets import QMessageBox
                 reply = QMessageBox.question(
                     self, 'Revoked Key',
                     'This API key has been revoked and will not work for authentication. '
@@ -1682,7 +1690,6 @@ class ServerConfigDialog(QDialog):
             clipboard.setText(copy_text)
 
         except Exception as e:
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, 'Error', f'Failed to copy API key: {e}')
 
     def get_values(self):
@@ -1970,7 +1977,6 @@ class PinDialog(QDialog):
 
         # Validate PIN format
         if not pin or len(pin) != 4 or not pin.isdigit():
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Invalid PIN", "PIN must be exactly 4 digits.")
             return
 
@@ -1978,7 +1984,6 @@ class PinDialog(QDialog):
         if self.is_setting_pin:
             confirm_pin = self.get_confirm_pin()
             if pin != confirm_pin:
-                from PyQt6.QtWidgets import QMessageBox
                 QMessageBox.warning(self, "PIN Mismatch", "PINs do not match. Please try again.")
                 return
 
