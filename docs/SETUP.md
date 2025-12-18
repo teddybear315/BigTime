@@ -517,4 +517,4 @@ For setup assistance:
 ---
 
 **Last Updated**: December 11, 2025
-**Version**: 2.1.1
+**Version**: 2.1.2

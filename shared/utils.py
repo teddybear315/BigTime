@@ -45,8 +45,8 @@ def get_data_path(relative_path: str) -> Path:
     (or the path returned by ``platformdirs.user_data_dir`` when available).
     """
     # Development: keep existing behavior for convenience
-    if not getattr(sys, 'frozen', False):
-        return Path(__file__).parent.parent / relative_path
+    # if not getattr(sys, 'frozen', False):
+    #     return Path(__file__).parent.parent / relative_path
 
     # Packaged app: prefer a per-user data dir (does not live inside the .app bundle)
     try:

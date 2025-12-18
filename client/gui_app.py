@@ -4,15 +4,13 @@ This module contains the main GUI application logic, separated from the UI widge
 """
 
 import sys
-from datetime import date, datetime, timedelta
-from pathlib import Path
+from datetime import datetime
 
-from PyQt6.QtCore import QDate, QObject, QSize, Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QBrush, QColor, QFont
-from PyQt6.QtWidgets import (QApplication, QDateEdit, QDialog, QFileDialog,
-                             QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QAction
+from PyQt6.QtWidgets import (QApplication, QDialog,
+                             QHBoxLayout, QLabel, QLineEdit,
                              QMainWindow, QMessageBox, QPushButton,
-                             QSizePolicy, QTableWidget, QTableWidgetItem,
                              QVBoxLayout, QWidget)
 
 from client.background_worker import NetworkWorker
@@ -21,11 +19,11 @@ from client.dialog_managers import (EmployeeListManager, ReportManager,
 from client.timeclock_client import get_client
 import shared
 from shared.logging_config import get_client_logger
-from shared.models import Employee
-from shared.utils import get_data_path, get_resource_path
-from ui.dialogs import (AddEmployeeDialog, ClientSyncConfigDialog,
-                        DateRangeDialog, EditEmployeeDialog, EditLogsDialog,
-                        OOTBClientDialog, SettingsDialog, EditTimeSelectorDialog)
+#from shared.models import Employee
+from shared.utils import get_data_path
+from ui import set_dialog_icon
+from ui.dialogs.shared import DatabaseSelectDialog
+from ui.dialogs.client import *
 from ui.fonts import fonts
 
 
@@ -196,7 +194,7 @@ class BigTimeClientApp(QMainWindow):
             if hasattr(self, 'network_worker'):
                 self.network_worker.check_server_connection.emit()
                 # Delay fetch_server_info to allow worker thread to fully initialize
-                QTimer.singleShot(500, lambda: self.network_worker.fetch_server_info.emit())
+                QTimer.singleShot(1500, lambda: self.network_worker.fetch_server_info.emit())
 
         except Exception as e:
             if hasattr(self, 'progress_label'):
@@ -411,12 +409,13 @@ class BigTimeClientApp(QMainWindow):
         menubar = self.menuBar()
 
         app_menu = menubar.addMenu('BigTime')
-        settings_action = QAction('Settings...', self)
-        settings_action.triggered.connect(self.edit_settings)
-        app_menu.addAction(settings_action)
+        self.settings_action = QAction('Settings...', self)
+        self.settings_action.triggered.connect(self.edit_settings)
+        self.settings_action.setEnabled(False)
+        app_menu.addAction(self.settings_action)
 
         # Exit action
-        exit_action = QAction("Quit...", self)
+        exit_action = QAction("Quit", self)
         exit_action.triggered.connect(self.close)
         app_menu.addAction(exit_action)
 
@@ -426,41 +425,62 @@ class BigTimeClientApp(QMainWindow):
         self.manager_login.triggered.connect(self.validate_manager_access)
         manager_menu.addAction(self.manager_login)
 
+        manager_menu.addSeparator()
+
+        self.view_emp_action = QAction('View Employees', self)
+        self.view_emp_action.triggered.connect(self.view_employees)
+        self.view_emp_action.setEnabled(False)
+        manager_menu.addAction(self.view_emp_action)
+
+        self.add_emp_action = QAction('Add Employee...', self)
+        self.add_emp_action.triggered.connect(self.add_employee)
+        self.add_emp_action.setEnabled(False)
+        manager_menu.addAction(self.add_emp_action)
+
+        manager_menu.addSeparator()
+
+        self.view_logs_action = QAction('View Time Logs', self)
+        self.view_logs_action.triggered.connect(self.view_time_logs)
+        self.view_logs_action.setEnabled(False)
+        manager_menu.addAction(self.view_logs_action)
+
+        self.edit_times_action = QAction('Edit Time Logs...', self)
+        self.edit_times_action.triggered.connect(self.edit_times)
+        self.edit_times_action.setEnabled(False)
+        manager_menu.addAction(self.edit_times_action)
+
         # Maintenance menu
         self.maintenance_menu = menubar.addMenu('Maintenance')
 
-        view_emp_action = QAction('View Employees', self)
-        view_emp_action.triggered.connect(self.view_employees)
-        self.maintenance_menu.addAction(view_emp_action)
-
-        add_emp_action = QAction('Add Employee...', self)
-        add_emp_action.triggered.connect(self.add_employee)
-        self.maintenance_menu.addAction(add_emp_action)
-
-        self.maintenance_menu.addSeparator()
-
-        view_logs_action = QAction('View Time Logs', self)
-        view_logs_action.triggered.connect(self.view_time_logs)
-        self.maintenance_menu.addAction(view_logs_action)
-
-        edit_times_action = QAction('Edit Time Logs...', self)
-        edit_times_action.triggered.connect(self.edit_times)
-        self.maintenance_menu.addAction(edit_times_action)
-
-        # Tools menu
-        self.tools_menu = menubar.addMenu('Tools')
-
-        server_config_action = QAction('Server Configuration...', self)
-        server_config_action.triggered.connect(self.configure_server)
-        self.tools_menu.addAction(server_config_action)
-
         sync_now_action = QAction('Sync Now', self)
         sync_now_action.triggered.connect(self.sync_now)
-        self.tools_menu.addAction(sync_now_action)
+        self.maintenance_menu.addAction(sync_now_action)
 
         retry_failed_action = QAction('Retry Failed Syncs', self)
         retry_failed_action.triggered.connect(self.retry_failed_syncs)
-        self.tools_menu.addAction(retry_failed_action)
+        self.maintenance_menu.addAction(retry_failed_action)
+
+        self.server_config_action = QAction('Server Configuration...', self)
+        self.server_config_action.triggered.connect(self.configure_server)
+        self.server_config_action.setEnabled(False)
+        self.maintenance_menu.addAction(self.server_config_action)
+
+        self.maintenance_menu.addSeparator()
+
+        self.backup_db_action = QAction('Backup Database', self)
+        self.backup_db_action.triggered.connect(self.backup_database)
+        self.backup_db_action.setEnabled(False)
+        self.maintenance_menu.addAction(self.backup_db_action)
+
+        self.restore_db_action = QAction('Restore Database...', self)
+        self.restore_db_action.triggered.connect(self.restore_database)
+        self.restore_db_action.setEnabled(False)
+        self.maintenance_menu.addAction(self.restore_db_action)
+
+        self.migrate_db_action = QAction('Migrate Database...', self)
+        self.migrate_db_action.triggered.connect(self.migrate_database)
+        self.migrate_db_action.setEnabled(False)
+        self.maintenance_menu.addAction(self.migrate_db_action)
 
         # Reporting menu
         self.reporting_menu = menubar.addMenu('Reporting')
@@ -468,14 +488,6 @@ class BigTimeClientApp(QMainWindow):
         gen_report_action = QAction('Generate Report...', self)
         gen_report_action.triggered.connect(self.generate_report)
         self.reporting_menu.addAction(gen_report_action)
-
-        backup_db_action = QAction('Backup Database', self)
-        backup_db_action.triggered.connect(self.backup_database)
-        self.reporting_menu.addAction(backup_db_action)
-
-        restore_db_action = QAction('Restore from Backup', self)
-        restore_db_action.triggered.connect(self.restore_database)
-        self.reporting_menu.addAction(restore_db_action)
 
     def check_manager_settings(self):
         """Check settings using client; ensure manager_pin exists"""
@@ -566,7 +578,6 @@ class BigTimeClientApp(QMainWindow):
     def validate_manager_access(self):
         """Handle moderator menu authentication"""
         if not self.is_moderator:
-            from ui.dialogs import PinDialog
             pin_dialog = PinDialog(self, set_flag=False)
             pin_dialog.setWindowTitle("Manager Authentication")
 
@@ -591,12 +602,19 @@ class BigTimeClientApp(QMainWindow):
 
     def update_menu_state(self):
         """Update menu state based on authentication"""
-        if not self.is_moderator:
-            for menu in [self.maintenance_menu, self.tools_menu]:
-                menu.setEnabled(False)
-        else:
-            for menu in [self.maintenance_menu, self.tools_menu]:
-                menu.setEnabled(True)
+        state = True if self.is_moderator else False
+
+        if state: self.manager_login.setText('Logout...')
+        else: self.manager_login.setText('Login...')
+        self.settings_action.setEnabled(state)
+        self.server_config_action.setEnabled(state)
+        self.view_emp_action.setEnabled(state)
+        self.add_emp_action.setEnabled(state)
+        self.view_logs_action.setEnabled(state)
+        self.edit_times_action.setEnabled(state)
+        self.backup_db_action.setEnabled(state)
+        self.restore_db_action.setEnabled(state)
+        self.migrate_db_action.setEnabled(state)
 
     def clock_in(self):
         """Handle clock in with PIN authentication"""
@@ -620,7 +638,6 @@ class BigTimeClientApp(QMainWindow):
         # PIN Authentication
         if not employee.pin or employee.pin.strip() == '':
             # Employee has no PIN set - prompt to set one
-            from ui.dialogs import PinDialog
             pin_dialog = PinDialog(self, set_flag=True)
             if pin_dialog.exec() == QDialog.DialogCode.Accepted:
                 new_pin = pin_dialog.get_pin()
@@ -640,7 +657,6 @@ class BigTimeClientApp(QMainWindow):
                 return
         else:
             # Employee has PIN - prompt to enter it
-            from ui.dialogs import PinDialog
             pin_dialog = PinDialog(self, set_flag=False)
             if pin_dialog.exec() == QDialog.DialogCode.Accepted:
                 entered_pin = pin_dialog.get_pin()
@@ -692,7 +708,6 @@ class BigTimeClientApp(QMainWindow):
         # PIN Authentication (same as clock_in)
         if not employee.pin or employee.pin.strip() == '':
             # Employee has no PIN set - prompt to set one
-            from ui.dialogs import PinDialog
             pin_dialog = PinDialog(self, set_flag=True)
             if pin_dialog.exec() == QDialog.DialogCode.Accepted:
                 new_pin = pin_dialog.get_pin()
@@ -712,7 +727,6 @@ class BigTimeClientApp(QMainWindow):
                 return
         else:
             # Employee has PIN - prompt to enter it
-            from ui.dialogs import PinDialog
             pin_dialog = PinDialog(self, set_flag=False)
             if pin_dialog.exec() == QDialog.DialogCode.Accepted:
                 entered_pin = pin_dialog.get_pin()
@@ -799,18 +813,18 @@ class BigTimeClientApp(QMainWindow):
         current_path = self.client.get_setting('report_save_path', str(get_data_path("reports")))
         manager_pin = self.client.get_setting('manager_pin', '')
 
-        dlg = SettingsDialog(self, manager_pin=manager_pin, report_save_path=current_path)
+        dlg = ConfigDialog(self, manager_pin=manager_pin, report_save_path=current_path)
 
         if dlg.exec() == QDialog.DialogCode.Accepted:
             values = dlg.get_values()
 
             # Save settings using client
+            self.manager_pin = values['manager_pin']
             self.client.set_setting('manager_pin', values['manager_pin'])
+
+            self.report_save_path = values['report_save_path']
             self.client.set_setting('report_save_path', values['report_save_path'])
 
-            # Update local values
-            self.manager_pin = values['manager_pin']
-            self.report_save_path = values['report_save_path']
 
     def configure_server(self):
         """Show server configuration dialog"""
@@ -831,7 +845,7 @@ class BigTimeClientApp(QMainWindow):
                 timeout=int(db_helpers.get_setting('timeout', '10'))
             )
 
-        dlg = ClientSyncConfigDialog(
+        dlg = ClientSyncSettingsDialog(
             self,
             server_url=current_config.server_url,
             device_id=current_config.device_id,
@@ -1102,23 +1116,26 @@ class BigTimeClientApp(QMainWindow):
             QMessageBox.warning(self, 'Backup Failed', f'Could not backup database: {e}')
 
     def restore_database(self):
-        """Restore the local database from the most recent backup"""
-        from shared.backup_utils import get_latest_backup_info, restore_from_backup
+        """Restore the local database from a backup file"""
+        from shared.backup_utils import restore_from_backup
+        from pathlib import Path
 
-        # Get the latest backup
-        backup_info = get_latest_backup_info('bigtime.db')
+        # Show file dialog for backup selection
+        dlg = DatabaseSelectDialog(self, default_filename='bigtime.db', restore=True)
 
-        if not backup_info:
-            QMessageBox.warning(self, 'Restore Failed', 'No backups available.')
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        backup_path, formatted_time = backup_info
+        backup_path = dlg.get_file_path()
+        if not backup_path or not Path(backup_path).exists():
+            QMessageBox.warning(self, 'Restore Failed', 'Selected backup file does not exist.')
+            return
 
         # Confirm with user
         reply = QMessageBox.question(
             self,
             'Restore Database',
-            f'Restore database from backup created on {formatted_time}?\n\n'
+            f'Restore database from:\n{backup_path}?\n\n'
             'Your current database will be backed up before restoring.',
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
@@ -1128,7 +1145,7 @@ class BigTimeClientApp(QMainWindow):
             return
 
         try:
-            restore_from_backup(backup_path, 'bigtime.db')
+            restore_from_backup(Path(backup_path), 'bigtime.db')
             QMessageBox.information(
                 self,
                 'Restore Complete',
@@ -1136,6 +1153,51 @@ class BigTimeClientApp(QMainWindow):
             )
         except Exception as e:
             QMessageBox.critical(self, 'Restore Failed', f'Could not restore database: {e}')
+
+    def migrate_database(self):
+        """Migrate a database file to the current schema version"""
+        from shared.backup_utils import create_backup_from_source
+        from shared.db_helpers import perform_database_migration
+        from pathlib import Path
+
+        # Show migration dialog
+        dlg = DatabaseSelectDialog(self, default_filename='bigtime.db', migrate=True)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        db_path = dlg.get_file_path()
+        if not db_path or not Path(db_path).exists():
+            QMessageBox.warning(self, 'Migration Failed', 'Selected database file does not exist.')
+            return
+
+        try:
+            # Create backup first
+            self.logger.info(f"Creating backup before migration of {db_path}")
+            backup_path = create_backup_from_source(db_path)
+            self.logger.info(f"Backup created: {backup_path}")
+
+            # Run migration
+            self.logger.info(f"Starting migration of {db_path}")
+            perform_database_migration(db_path)
+
+            QMessageBox.information(
+                self,
+                'Migration Complete',
+                f'Database has been successfully migrated.\n\n'
+                f'Original DB Backup saved to: {backup_path.name}\n\n'
+                'The database is now ready to use.\nNote: This does not import the migrated database. Please select \'Maintenance\' > \'Restore Database.\' to import the database.'
+            )
+            self.logger.info("Migration completed successfully")
+
+        except Exception as e:
+            self.logger.error(f"Migration failed: {e}")
+            QMessageBox.critical(
+                self,
+                'Migration Failed',
+                f'Could not migrate database: {e}\n\n'
+                f'A backup was created if needed.'
+            )
 
     def closeEvent(self, event):
         """Handle application close"""

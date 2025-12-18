@@ -7,12 +7,11 @@ import re
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from shared.models import Employee, PayPeriod, SyncState, TimeLog
 from shared.utils import (format_date, format_datetime, get_data_path,
-                          get_resource_path, parse_date, parse_datetime,
-                          to_int_optional)
+                          parse_date, parse_datetime)
 
 
 # Database configuration constants
@@ -124,12 +123,21 @@ def init_database():
     """Initialize the database with required tables and migrations"""
     db_path = get_db_path()
     conn = sqlite3.connect(str(db_path))
-    # Improve concurrency: wait up to 5s on locks and use WAL mode
+    # Use traditional journal mode for simpler, more reliable concurrency
     try:
         conn.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}")
-        conn.execute("PRAGMA journal_mode = WAL")
-    except Exception:
-        pass
+        conn.execute("PRAGMA journal_mode = DELETE")
+
+        # Check integrity and repair if needed
+        cursor = conn.execute("PRAGMA integrity_check")
+        result = cursor.fetchone()[0]
+        if result != 'ok':
+            logger.warning(f"Database integrity issue detected: {result}")
+            conn.execute("REINDEX")
+            conn.commit()
+            logger.info("Database repair completed")
+    except Exception as e:
+        logger.warning(f"Failed to set PRAGMA options: {e}")
     conn.row_factory = sqlite3.Row
 
     try:
@@ -1151,6 +1159,158 @@ def insert_log_from_object(log: TimeLog) -> Optional[int]:
     return log_id
 
 
-# Initialize database on import
-if not get_db_path().exists():
-    init_database()
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Check if a column exists in a table.
+
+    Args:
+        conn: SQLite database connection
+        table: Table name to check
+        column: Column name to check for
+
+    Returns:
+        True if column exists, False otherwise
+    """
+    cursor = conn.execute(f"PRAGMA table_info({table})")
+    columns = [row[1] for row in cursor.fetchall()]
+    return column in columns
+
+
+def perform_database_migration(db_path: str) -> None:
+    """Perform schema migration on a database file.
+
+    Handles schema updates for both client and server databases:
+    - Ensures all required tables exist
+    - Adds missing columns to existing tables
+    - Activates inactive API keys (server only)
+    - Repairs database integrity issues
+    - Preserves all existing data
+
+    Args:
+        db_path: Path to the database file to migrate
+
+    Raises:
+        sqlite3.Error: If migration fails
+        FileNotFoundError: If database file doesn't exist
+    """
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Check and repair database integrity before migration
+        try:
+            cursor.execute("PRAGMA integrity_check")
+            integrity_result = cursor.fetchone()[0]
+            if integrity_result != 'ok':
+                logger.warning(f"Database integrity issue detected: {integrity_result}")
+                logger.info("Running REINDEX to repair database...")
+                cursor.execute("REINDEX")
+                conn.commit()
+                logger.info("Database repair completed")
+        except Exception as e:
+            logger.warning(f"Failed to check/repair database integrity: {e}")
+
+        # Migration 1: Ensure api_keys table exists with correct schema
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_key TEXT UNIQUE NOT NULL,
+                device_id TEXT,
+                active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_used TIMESTAMP
+            )
+        """)
+
+        # Add missing columns to api_keys
+        if not _column_exists(conn, 'api_keys', 'device_id'):
+            cursor.execute("ALTER TABLE api_keys ADD COLUMN device_id TEXT")
+
+        if not _column_exists(conn, 'api_keys', 'active'):
+            cursor.execute("ALTER TABLE api_keys ADD COLUMN active INTEGER DEFAULT 1")
+
+        if not _column_exists(conn, 'api_keys', 'created_at'):
+            cursor.execute("ALTER TABLE api_keys ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+
+        if not _column_exists(conn, 'api_keys', 'last_used'):
+            cursor.execute("ALTER TABLE api_keys ADD COLUMN last_used TIMESTAMP")
+
+        # Ensure all existing api_keys are marked as active
+        cursor.execute("""
+            UPDATE api_keys
+            SET active = 1
+            WHERE active IS NULL OR active = 0
+        """)
+
+        # Migration 2: Ensure settings table exists
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Migration 3: Ensure employees table has required columns
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS employees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                badge TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                status TEXT,
+                deactivated INTEGER DEFAULT 0,
+                pin TEXT,
+                rate REAL,
+                period TEXT DEFAULT 'hourly',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Add missing columns to employees
+        if not _column_exists(conn, 'employees', 'pin'):
+            cursor.execute("ALTER TABLE employees ADD COLUMN pin TEXT")
+
+        if not _column_exists(conn, 'employees', 'deactivated'):
+            cursor.execute("ALTER TABLE employees ADD COLUMN deactivated INTEGER DEFAULT 0")
+
+        if not _column_exists(conn, 'employees', 'updated_at'):
+            cursor.execute("ALTER TABLE employees ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+
+        # Migration 4: Ensure time_logs table exists with required columns
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS time_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                badge TEXT NOT NULL,
+                clock_in TIMESTAMP,
+                clock_out TIMESTAMP,
+                notes TEXT,
+                synced INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Add missing columns to time_logs
+        if not _column_exists(conn, 'time_logs', 'synced'):
+            cursor.execute("ALTER TABLE time_logs ADD COLUMN synced INTEGER DEFAULT 0")
+
+        if not _column_exists(conn, 'time_logs', 'updated_at'):
+            cursor.execute("ALTER TABLE time_logs ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+
+        # Migration 5: Ensure pending_changes table exists
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS pending_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                change_type TEXT NOT NULL,
+                entity_type TEXT,
+                entity_id TEXT,
+                data TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Commit all changes
+        conn.commit()
+
+

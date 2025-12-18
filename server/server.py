@@ -3,12 +3,9 @@ BigTime REST API Server
 Provides centralized server for multiple BigTime clients with time synchronization.
 """
 
-import os
 import sqlite3
 import uuid
-from datetime import date, datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from datetime import datetime
 
 from flask import Flask, g, jsonify, request
 from flask_cors import CORS
@@ -16,10 +13,9 @@ from flask_cors import CORS
 from server.timeserver_service import get_time_service, initialize_time_service
 import shared
 from shared.logging_config import get_server_logger
-from shared.models import (ApiResponse, CreateLogRequest, Employee, PayPeriod,
-                           SyncState, TimeLog, UpdateLogRequest)
+from shared.models import (ApiResponse, Employee, PayPeriod, TimeLog)
 from shared.utils import (format_date, format_datetime, get_data_path,
-                          parse_date, parse_datetime)
+                          parse_date)
 
 # Setup standardized logging
 logger = get_server_logger()
@@ -48,13 +44,15 @@ API_KEYS = {
 def get_db():
     """Get database connection (for Flask context).
 
-    Sets up connection with WAL mode and busy timeout for concurrent access.
+    Uses traditional rollback journal (not WAL) for simpler concurrency model.
+    Sets busy timeout for retry on locked database.
     """
     if 'db' not in g:
         g.db = sqlite3.connect(str(SERVER_DB))
         try:
             g.db.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}")
-            g.db.execute("PRAGMA journal_mode = WAL")
+            # Use traditional journal mode for simpler concurrency
+            g.db.execute("PRAGMA journal_mode = DELETE")
         except Exception as e:
             logger.warning(f"Failed to set PRAGMA options: {e}")
         g.db.row_factory = sqlite3.Row
@@ -64,12 +62,14 @@ def get_db():
 def get_standalone_db():
     """Get standalone database connection (outside Flask context).
 
-    Sets up connection with WAL mode and busy timeout for concurrent access.
+    Uses traditional rollback journal (not WAL) for simpler concurrency model.
+    Sets busy timeout for retry on locked database.
     """
     conn = sqlite3.connect(str(SERVER_DB))
     try:
         conn.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}")
-        conn.execute("PRAGMA journal_mode = WAL")
+        # Use traditional journal mode for simpler concurrency
+        conn.execute("PRAGMA journal_mode = DELETE")
     except Exception as e:
         logger.warning(f"Failed to set PRAGMA options: {e}")
     conn.row_factory = sqlite3.Row
@@ -93,10 +93,23 @@ def init_server_db():
     conn = sqlite3.connect(str(SERVER_DB))
     try:
         conn.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}")
-        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA journal_mode = DELETE")  # Use traditional rollback journal
     except Exception:
         pass
     conn.row_factory = sqlite3.Row
+
+    # Check database integrity at startup
+    try:
+        cursor = conn.execute("PRAGMA integrity_check")
+        result = cursor.fetchone()
+        if result[0] != 'ok':
+            logger.warning(f"Database integrity issue detected: {result[0]}")
+            logger.info("Running REINDEX to repair...")
+            conn.execute("REINDEX")
+            conn.commit()
+            logger.info("Database repair completed")
+    except Exception as e:
+        logger.warning(f"Failed to check database integrity: {e}")
 
     try:
         # Employees table
@@ -158,8 +171,8 @@ def init_server_db():
 
         # Insert default API key
         conn.execute("""
-            INSERT OR IGNORE INTO api_keys (key, device_id)
-            VALUES ('default-api-key', 'default-device')
+            INSERT OR IGNORE INTO api_keys (key, device_id, active)
+            VALUES ('default-api-key', 'default-device', 1)
         """)
 
         # Insert default settings
@@ -185,9 +198,9 @@ def init_server_db():
     finally:
         conn.close()
 
-    # Initialize time service
+    # Initialize time service (but don't start it yet - that happens in run_server)
     try:
-        initialize_time_service('UTC')  # Use default sync interval
+        initialize_time_service('UTC', start=False)  # Use default sync interval
         logger.info("Time service initialized with UTC")
     except Exception as e:
         logger.error(f"Failed to initialize time service: {e}")
@@ -303,27 +316,53 @@ def authenticate_request():
     """Authenticate API request using Bearer token"""
     auth_header = request.headers.get('Authorization')
     if not auth_header or not auth_header.startswith('Bearer '):
+        logger.debug("Auth failed: No Bearer token in request")
         return None
 
     api_key = auth_header[7:]  # Remove 'Bearer '
+    logger.debug(f"Authenticating with API key: {api_key[:8]}...")
 
     db = get_db()
+
+    # First check if the key exists at all
     cursor = db.execute(
-        "SELECT device_id FROM api_keys WHERE key = ? AND active = TRUE",
+        "SELECT device_id, active FROM api_keys WHERE key = ?",
         (api_key,)
     )
     row = cursor.fetchone()
 
-    if row:
-        # Update last used timestamp
+    if not row:
+        # Debug: Check what keys ARE in the database
+        all_keys = db.execute("SELECT COUNT(*) as count FROM api_keys").fetchone()
+        logger.warning(f"Auth failed: API key not found in database (key: {api_key[:8]}...). Total keys in DB: {all_keys['count']}")
+
+        # List first few keys for debugging (masked for security)
+        sample_keys = db.execute("SELECT key FROM api_keys LIMIT 5").fetchall()
+        logger.debug(f"Sample keys in database: {[k['key'][:8] + '...' for k in sample_keys]}")
+        return None
+
+    device_id = row['device_id']
+    active = row['active']
+
+    logger.debug(f"Found API key in database - device_id={device_id}, active={active} (type={type(active).__name__})")
+
+    # Check if key is active (handle both int and boolean)
+    is_active = active == 1 or active == True or active == '1'
+    if not is_active:
+        logger.warning(f"Auth failed: API key exists but is not active (active={active})")
+        return None
+
+    # Update last used timestamp
+    try:
         db.execute(
             "UPDATE api_keys SET last_used = CURRENT_TIMESTAMP WHERE key = ?",
             (api_key,)
         )
         db.commit()
-        return row['device_id']
+    except Exception as e:
+        logger.warning(f"Failed to update last_used timestamp: {e}")
 
-    return None
+    return device_id
 
 
 def require_auth(f):
@@ -862,8 +901,8 @@ def onboard_device():
 
         db = get_db()
         db.execute("""
-            INSERT INTO api_keys (key, device_id, created_at, last_used)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO api_keys (key, device_id, created_at, last_used, active)
+            VALUES (?, ?, ?, ?, 1)
         """, (api_key, device_id, format_datetime(datetime.now()), format_datetime(datetime.now())))
         db.commit()
 
@@ -881,6 +920,14 @@ def onboard_device():
 
 def run_server(host='0.0.0.0', port=DEFAULT_SERVER_PORT):
     """Run server with Waitress WSGI server"""
+    # Start time service now that server is running
+    try:
+        time_service = get_time_service()
+        time_service.start_sync_service()
+        logger.info("Time service started")
+    except Exception as e:
+        logger.warning(f"Failed to start time service: {e}")
+
     # Use create_server/run to allow a programmatic shutdown
     try:
         from waitress import create_server
@@ -931,6 +978,14 @@ def run_server(host='0.0.0.0', port=DEFAULT_SERVER_PORT):
             logger.error(f"Server error during run: {e}")
             raise
         finally:
+            # Stop time service
+            try:
+                time_service = get_time_service()
+                time_service.stop_sync_service()
+                logger.info("Time service stopped")
+            except Exception as e:
+                logger.warning(f"Failed to stop time service: {e}")
+
             # Ensure proper cleanup on exit
             with _waitress_lock:
                 try:

@@ -5,9 +5,9 @@ Used by both server and client components.
 
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import date
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 
 class SyncState(Enum):

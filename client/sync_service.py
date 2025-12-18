@@ -69,10 +69,13 @@ class RemoteSyncService(QObject):
         # Set API key in session headers if available
         if self.config.api_key:
             self._session.headers['Authorization'] = f'Bearer {self.config.api_key}'
+            logger.debug(f"Session initialized with API key: {self.config.api_key[:8]}... (length={len(self.config.api_key)})")
+        else:
+            logger.debug("No API key configured for session")
 
     def _trigger_background_sync(self) -> None:
         """Trigger inbound sync (pull updates) in background thread to avoid blocking UI.
-        
+
         Called by timer periodically. Pulls server updates without pushing local changes.
         """
         def background_sync():
@@ -85,7 +88,10 @@ class RemoteSyncService(QObject):
         sync_thread.start()
 
     def _trigger_background_connection_check(self):
-        """Trigger connection check in background thread to avoid blocking UI"""
+        """Trigger connection check in background thread to avoid blocking UI
+
+        Checks connection every 500ms to keep status display current.
+        """
         def background_check():
             try:
                 self.check_connection()
@@ -176,13 +182,15 @@ class RemoteSyncService(QObject):
             db_helpers.set_setting('device_id', device_id)
             logger.info(f"Generated new device ID: {device_id}")
 
-        return ServerConfig(
+        config = ServerConfig(
             server_url=db_helpers.get_setting('server_url', ''),
             device_id=device_id,
             api_key=db_helpers.get_setting('api_key', ''),
             sync_interval=int(db_helpers.get_setting('sync_interval', '30')),
             timeout=int(db_helpers.get_setting('timeout', '10'))
         )
+
+        return config
 
     def update_config(self, config: ServerConfig):
         """Update server configuration"""
@@ -236,8 +244,8 @@ class RemoteSyncService(QObject):
         # Start sync timer
         self.sync_timer.start(self.config.sync_interval * 1000)
 
-        # Start connection check timer (every 5 seconds)
-        self.connection_timer.start(5000)
+        # Start connection check timer (every 500ms for responsive status updates)
+        self.connection_timer.start(500)
 
         logger.info("Remote sync service started")
         return True
@@ -264,6 +272,11 @@ class RemoteSyncService(QObject):
                 timeout=3  # Short timeout to prevent UI freezing
             )
             is_online = response.status_code == 200
+
+            if response.status_code == 401:
+                logger.warning(f"Unauthorized (401) on /health - API key may be invalid: {self.config.api_key[:8]}...")
+            elif response.status_code != 200:
+                logger.debug(f"Health check returned {response.status_code}: {response.text[:200]}")
 
             # Store connection state for get_sync_status
             self.is_online = is_online
@@ -368,7 +381,7 @@ class RemoteSyncService(QObject):
 
     def sync_now(self) -> bool:
         """Perform immediate outbound sync (push pending changes) only, no wait for responses.
-        
+
         Outbound sync happens immediately on data changes without waiting for inbound updates.
         This is called when user makes local changes (clock in/out, employee edits, etc).
         """
@@ -438,7 +451,7 @@ class RemoteSyncService(QObject):
 
     def full_sync_now(self) -> bool:
         """Perform full bidirectional sync (outbound + inbound).
-        
+
         Used for initial sync and manual full sync requests. Applies throttling
         to avoid hammering the server with repeated requests.
         """
@@ -533,7 +546,7 @@ class RemoteSyncService(QObject):
 
     def _pull_server_updates_only(self) -> bool:
         """Pull updates from server (inbound sync only, no outbound push).
-        
+
         Called by timer periodically to check for server updates. No throttling,
         runs on a regular schedule. Does not push local changes.
         """
@@ -687,12 +700,12 @@ class RemoteSyncService(QObject):
 
     def _fetch_consolidated_sync_data(self) -> Dict[str, Any]:
         """Fetch all sync-related data in consolidated queries to reduce database round-trips.
-        
+
         Returns a dictionary containing:
         - pending_changes: All pending changes to sync
         - pending_logs: All pending logs
         - employees: All employees (for batch operations)
-        
+
         This consolidates multiple queries that are commonly used together.
         """
         try:

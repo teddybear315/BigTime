@@ -91,7 +91,7 @@ Host: localhost:5000
 {
   "company_name": "BigTime",
   "current_time": DateTime,
-  "server_version": "2.1.1",
+  "server_version": "2.1.2",
   "api_version": "1.1",
   "timezone": "America/New_York"
 }
@@ -823,4 +823,4 @@ For API issues or questions:
 
 **API Version**: 1.1
 **Last Updated**: December 11, 2025
-**Server Version**: 2.1.1
+**Server Version**: 2.1.2

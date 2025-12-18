@@ -230,9 +230,20 @@ def get_time_service() -> TimeServerService:
     return _time_service
 
 
-def initialize_time_service(timezone_name: str = 'UTC', sync_interval: int = 5):
-    """Initialize the global time service"""
+def initialize_time_service(timezone_name: str = 'UTC', sync_interval: int = 5, start: bool = True):
+    """Initialize the global time service
+
+    Only initializes once. Subsequent calls are ignored to prevent overwriting
+    a running time service.
+
+    Args:
+        timezone_name: Timezone for the service
+        sync_interval: Seconds between sync attempts
+        start: If True, start the sync service immediately. If False, it must be started manually.
+    """
     global _time_service
-    _time_service = TimeServerService(timezone_name, sync_interval)
-    _time_service.start_sync_service()
+    if _time_service is not None:
+        # Already initialized, don't overwrite
+        return _time_service
+
     return _time_service

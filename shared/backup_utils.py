@@ -71,6 +71,41 @@ def create_backup(db_name: str, is_server: bool = False) -> Optional[Path]:
         raise IOError(f"Failed to create backup: {e}")
 
 
+def create_backup_from_source(source_path: str) -> Path:
+    """Create a timestamped backup of a database file from any source location.
+
+    This is useful for migrating or backing up databases from arbitrary locations
+    (e.g., when user selects a file via file dialog).
+
+    Args:
+        source_path: Full path to the source database file to backup
+
+    Returns:
+        Path to the created backup file
+
+    Raises:
+        FileNotFoundError: If the source database file doesn't exist
+        IOError: If backup file cannot be written
+    """
+    source = Path(source_path)
+
+    if not source.exists():
+        raise FileNotFoundError(f"Database file not found: {source}")
+
+    backup_dir = source.parent  # Create backup in same directory as source
+
+    now = datetime.now()
+    backup_name = f'{source.stem}.backup.{now.strftime("%Y%m%d_%H%M%S")}.db'
+    backup_path = backup_dir / backup_name
+
+    try:
+        shutil.copy2(source, backup_path)
+        return backup_path
+    except Exception as e:
+        raise IOError(f"Failed to create backup: {e}")
+
+
+
 def restore_from_backup(backup_path: Path, db_name: str) -> bool:
     """Restore a database from a backup file.
 

@@ -6,8 +6,6 @@ Provides consistent logging across client and server components.
 import logging
 import sys
 from datetime import datetime
-from pathlib import Path
-from typing import Optional
 
 try:
     from termcolor import colored
@@ -111,7 +109,7 @@ def setup_logging(component: str, level: str = "INFO", log_to_file: bool = True)
             log_dir = get_data_path('logs')
             log_dir.mkdir(exist_ok=True)
 
-            log_file = log_dir / f"bigtime_{component.lower()}_{datetime.now().strftime('%Y%m%d')}.log"
+            log_file = log_dir / f"bigtime_{component.lower()}_{datetime.now().strftime('%m-%d-%Y %H-%M-%S')}.log"
 
             file_handler = logging.FileHandler(log_file, encoding='utf-8')
             file_handler.setFormatter(BigTimeFormatter(component, use_colors=False))

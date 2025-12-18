@@ -7,15 +7,16 @@ Supports Windows, Linux, and macOS with appropriate fallbacks.
 import os
 import platform
 import sys
-from pathlib import Path
 
-from PyQt6.QtCore import QCoreApplication, QThread, QTimer, pyqtSignal, QObject
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtCore import QThread, QTimer, pyqtSignal, QObject
+from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (QApplication, QDialog, QMenu, QMessageBox,
                              QSystemTrayIcon)
 
 import shared
 from shared.logging_config import get_server_logger
+from ui.dialogs.shared import DatabaseSelectDialog
+from ui.dialogs.server import *
 
 # Setup standardized logging
 logger = get_server_logger()
@@ -110,7 +111,7 @@ class ServerManager(QThread):
         except Exception as e:
             logger.debug(f"Thread wait error: {e}")
 
-        # Ensure running flag cleared and emit stopped for UI update
+        # Ensure running flag cleared and emit signal from main thread (safe here)
         self.server_running = False
         try:
             self.server_stopped.emit()
@@ -204,44 +205,53 @@ class BigTimeServerTray(QObject):
         """Create the right-click context menu"""
         menu = QMenu()
 
+        # Status action (non-clickable info)
+        self.status_action = QAction(f"Status: v{shared.__VERSION__} Stopped", self)
+        self.status_action.setEnabled(False)
+        menu.addAction(self.status_action)
+        menu.addSeparator()
+
         # Server control actions
         self.start_action = QAction("Start Server", self)
         self.start_action.triggered.connect(self.start_server)
+        menu.addAction(self.start_action)
 
         self.stop_action = QAction("Stop Server", self)
         self.stop_action.triggered.connect(self.stop_server)
         self.stop_action.setEnabled(False)
+        menu.addAction(self.stop_action)
+
+        menu.addSeparator()
 
         # Configuration action
         self.config_action = QAction("Configure...", self)
         self.config_action.triggered.connect(self.show_config)
+        menu.addAction(self.config_action)
 
-        # Backup action
+        # Backup action (disabled by default)
         self.backup_action = QAction("Backup Database", self)
         self.backup_action.triggered.connect(self.backup_database)
+        self.backup_action.setEnabled(False)
+        menu.addAction(self.backup_action)
 
-        # Restore action
-        self.restore_action = QAction("Restore from Backup", self)
+        # Restore action (disabled by default)
+        self.restore_action = QAction("Restore Database...", self)
         self.restore_action.triggered.connect(self.restore_database)
+        self.restore_action.setEnabled(False)
+        menu.addAction(self.restore_action)
 
-        # Status action (non-clickable info)
-        self.status_action = QAction("Status: Stopped", self)
-        self.status_action.setEnabled(False)
+        # Migrate action (disabled by default)
+        self.migrate_db_action = QAction('Migrate Database...', self)
+        self.migrate_db_action.triggered.connect(self.migrate_database)
+        self.migrate_db_action.setEnabled(False)
+        menu.addAction(self.migrate_db_action)
+
+
+        menu.addSeparator()
 
         # Separator and quit
         self.quit_action = QAction("Exit", self)
         self.quit_action.triggered.connect(self.quit_application)
-
-        # Add actions to menu
-        menu.addAction(self.status_action)
-        menu.addSeparator()
-        menu.addAction(self.start_action)
-        menu.addAction(self.stop_action)
-        menu.addSeparator()
-        menu.addAction(self.config_action)
-        menu.addAction(self.backup_action)
-        menu.addAction(self.restore_action)
-        menu.addSeparator()
         menu.addAction(self.quit_action)
 
         self.tray_icon.setContextMenu(menu)
@@ -301,9 +311,9 @@ class BigTimeServerTray(QObject):
 
     def show_ootb_setup(self):
         """Show first-time server setup dialog"""
-        from ui.dialogs import OOTBServerDialog
+        from ui.dialogs.server import OOTBDialog
 
-        dialog = OOTBServerDialog(
+        dialog = OOTBDialog(
             company_name=self.company_name,
             host=self.host,
             port=self.port
@@ -327,9 +337,8 @@ class BigTimeServerTray(QObject):
 
     def show_config(self):
         """Show configuration dialog"""
-        from ui.dialogs import ServerConfigDialog
 
-        dialog = ServerConfigDialog(
+        dialog = ConfigDialog(
             host=self.host,
             port=self.port,
             autostart=self.autostart
@@ -360,23 +369,26 @@ class BigTimeServerTray(QObject):
             QMessageBox.warning(None, 'Backup Failed', f'Could not backup database: {e}')
 
     def restore_database(self):
-        """Restore the server database from the most recent backup"""
-        from shared.backup_utils import get_latest_backup_info, restore_from_backup
+        """Restore the server database from a backup file"""
+        from shared.backup_utils import restore_from_backup
+        from pathlib import Path
 
-        # Get the latest backup
-        backup_info = get_latest_backup_info('server_bigtime.db')
+        # Show file picker dialog
+        dlg = DatabaseSelectDialog(None, default_filename='server_bigtime.backup.db', restore=True)
 
-        if not backup_info:
-            QMessageBox.warning(None, 'Restore Failed', 'No backups available.')
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        backup_path, formatted_time = backup_info
+        backup_path = dlg.get_file_path()
+        if not backup_path or not Path(backup_path).exists():
+            QMessageBox.warning(None, 'Restore Failed', 'Selected backup file does not exist.')
+            return
 
         # Confirm with user
         reply = QMessageBox.question(
             None,
             'Restore Database',
-            f'Restore database from backup created on {formatted_time}?\n\n'
+            f'Restore database from {Path(backup_path).name}?\n\n'
             'Your current database will be backed up before restoring.',
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
@@ -386,7 +398,7 @@ class BigTimeServerTray(QObject):
             return
 
         try:
-            restore_from_backup(backup_path, 'server_bigtime.db')
+            restore_from_backup(Path(backup_path), 'server_bigtime.db')
             QMessageBox.information(
                 None,
                 'Restore Complete',
@@ -394,6 +406,87 @@ class BigTimeServerTray(QObject):
             )
         except Exception as e:
             QMessageBox.critical(None, 'Restore Failed', f'Could not restore database: {e}')
+
+    def migrate_database(self):
+        """Migrate the server database to the current schema version"""
+        from shared.backup_utils import create_backup_from_source
+        from shared.db_helpers import perform_database_migration
+        from pathlib import Path
+        import shutil
+        import tempfile
+        import os
+
+        # Show migration dialog
+        dlg = DatabaseSelectDialog(None, default_filename='server_bigtime.db', migrate=True)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        db_path = dlg.get_file_path()
+        if not db_path or not Path(db_path).exists():
+            QMessageBox.warning(None, 'Migration Failed', 'Selected database file does not exist.')
+            return
+
+        try:
+            # Create backup first (from original location)
+            logger.info(f"Creating backup before migration of {db_path}")
+            backup_path = create_backup_from_source(db_path)
+            logger.info(f"Backup created: {backup_path}")
+
+            # Check if the database is on a network mount (common issue on macOS)
+            # If so, work with a temporary local copy
+            working_db_path = db_path
+            is_network_mount = os.path.ismount(str(Path(db_path).parent))
+
+            if is_network_mount:
+                logger.info(f"Database is on a network mount, creating temporary local copy for migration")
+                # Create a temp copy in the system temp directory
+                with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp:
+                    temp_db_path = tmp.name
+
+                try:
+                    # Copy to temp location
+                    shutil.copy2(db_path, temp_db_path)
+                    working_db_path = temp_db_path
+                    logger.info(f"Created temporary database copy at {temp_db_path}")
+                except Exception as e:
+                    logger.error(f"Failed to create temporary copy: {e}")
+                    raise
+            else:
+                temp_db_path = None
+
+            # Run migration on working copy
+            logger.info(f"Starting migration of {working_db_path}")
+            perform_database_migration(working_db_path)
+
+            # If we used a temp copy, move it back to the original location
+            if temp_db_path:
+                logger.info(f"Copying migrated database back to {db_path}")
+                shutil.copy2(working_db_path, db_path)
+                # Clean up temp file
+                try:
+                    os.unlink(temp_db_path)
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temp file {temp_db_path}: {e}")
+
+            QMessageBox.information(
+                None,
+                'Migration Complete',
+                f'Database has been successfully migrated.\n\n'
+                f'Original DB Backup saved to: {backup_path.name}\n\n'
+                'The database is now ready to use.\nNote: This does not import the migrated database. Please select \'Maintenance\' > \'Restore Database.\' to import the database.'
+            )
+            logger.info("Migration completed successfully")
+
+        except Exception as e:
+            logger.error(f"Migration failed: {e}")
+            QMessageBox.critical(
+                None,
+                'Migration Failed',
+                f'Could not migrate database: {e}\n\n'
+                f'A backup was created if needed.'
+            )
+
 
     def on_server_started(self):
         """Handle server started event"""
