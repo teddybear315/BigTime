@@ -1,5 +1,10 @@
 # BigTime Version Tracker
 
+### Version 2.1.3
+- ✅ **Fixed Log Viewer**: Log viewer now correctly filters by date range.
+- ✅ **Commit Reference**: v2.1.3 commit by Logan Houston on December 17, 2025.
+
+
 ### Version 2.1.2 (Current - December 17, 2025)
 **Release Summary**: Maintenance update with DB safety checks, modularized dialogs, enhanced backup/migration tooling, and refreshed docs.
 - ✅ **Server Reliability**: Startup integrity check with repair attempt, rollback journaling for simpler concurrency, deferred time-service start after server boot, and stricter API-key auth (active flag enforcement, clearer diagnostics, safer defaults).

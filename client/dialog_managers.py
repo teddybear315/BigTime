@@ -46,7 +46,11 @@ class TimeLogsManager:
         """
         dlg = DateRangeDialog(parent)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            start_date, end_date = dlg.get_dates()
+            start_date_str, end_date_str = dlg.get_dates()
+            
+            # Convert string dates to date objects for comparison
+            start_date = datetime.strptime(start_date_str, '%m-%d-%Y').date()
+            end_date = datetime.strptime(end_date_str, '%m-%d-%Y').date()
 
             try:
                 # Get logs for the selected date range
@@ -62,24 +66,24 @@ class TimeLogsManager:
                             if start_date <= log_date <= end_date:
                                 logs.append(log)
                         except:
-                            # If we can't parse the date, include it anyway
-                            logs.append(log)
+                            # If we can't parse the date, skip it
+                            pass
 
                 if not logs:
                     QMessageBox.information(parent, 'Time Logs',
-                                          f'No logs found from {start_date} to {end_date}')
+                                          f'No logs found from {start_date_str} to {end_date_str}')
                     return
 
                 # Create and show logs dialog
                 logs_dialog = QDialog(parent)
-                logs_dialog.setWindowTitle(f'Time Logs ({start_date} to {end_date})')
+                logs_dialog.setWindowTitle(f'Time Logs ({start_date_str} to {end_date_str})')
                 logs_dialog.setFixedWidth(400)
 
                 layout = QVBoxLayout(logs_dialog)
 
                 title = QLabel('Time Log Viewer')
                 title.setFont(fonts["header"])
-                sub_title = QLabel(f'Time Logs from {start_date} to {end_date}')
+                sub_title = QLabel(f'Time Logs from {start_date_str} to {end_date_str}')
                 sub_title.setFont(fonts["small"])
                 layout.addWidget(title)
                 layout.addWidget(sub_title)
